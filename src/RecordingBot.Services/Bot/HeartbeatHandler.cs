@@ -3,6 +3,7 @@ using Microsoft.Graph.Communications.Common.Telemetry;
 using System;
 using System.Threading.Tasks;
 using System.Timers;
+using Timer = System.Timers.Timer;
 
 namespace RecordingBot.Services.Bot
 {
