@@ -7,10 +7,13 @@ using RecordingBot.Model.Constants;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.ServiceSetup;
 using RecordingBot.Services.Util;
+using SottoTeamsBot.Aws;
+using SottoTeamsBot.Calls;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
 
@@ -24,13 +27,22 @@ namespace RecordingBot.Services.Bot
         private readonly CaptureEvents _capture;
         private bool _isDisposed = false;
 
+        // Sotto integration: dependencies + session state for S3 upload and SQS enqueue.
+        private readonly DynamoResolver _dynamo;
+        private readonly AwsUploader _uploader;
+        private CallSession _session;
+        private bool _sottoFinalized;
+        private readonly SemaphoreSlim _sottoFinalizeLock = new(1, 1);
+
         public ICall Call { get; }
         public BotMediaStream BotMediaStream { get; private set; }
 
-        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
+        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher, DynamoResolver dynamo, AwsUploader uploader) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
         {
             _settings = (AzureSettings)settings;
             _eventPublisher = eventPublisher;
+            _dynamo = dynamo;
+            _uploader = uploader;
 
             Call = statefulCall;
             Call.OnUpdated += CallOnUpdated;
@@ -60,6 +72,11 @@ namespace RecordingBot.Services.Bot
             Call.Participants.OnUpdated -= ParticipantsOnUpdated;
 
             BotMediaStream?.Dispose();
+
+            if (disposing)
+            {
+                _sottoFinalizeLock?.Dispose();
+            }
 
             // Event - Dispose of the call completed ok
             _eventPublisher.Publish("CallDisposedOK", $"Call.Id: {Call.Id}");
@@ -119,6 +136,9 @@ namespace RecordingBot.Services.Bot
             {
                 // Call is established. We should start receiving Audio, we can inform clients that we have started recording.
                 OnRecordingStatusFlip(sender);
+
+                // Sotto integration: resolve tenant + agent from DynamoDB so we know where to write in S3.
+                _ = SottoInitializeSessionAsync(sender);
             }
 
             if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))
@@ -138,6 +158,110 @@ namespace RecordingBot.Services.Bot
                 {
                     await _capture?.Finalize();
                 }
+
+                // Sotto integration: build stereo WAV from SottoAudioBuffer, upload to S3, publish SQS.
+                await SottoFinalizeAsync();
+            }
+        }
+
+        /// <summary>
+        /// Sotto integration: resolve Sotto tenant_id and agent_id from the Microsoft tenant/participant IDs
+        /// and prime the CallSession state used at finalization.
+        /// </summary>
+        private async Task SottoInitializeSessionAsync(ICall call)
+        {
+            try
+            {
+                var msTenantId = call.Resource?.TenantId ?? string.Empty;
+                var observedId = call.Resource?.IncomingContext?.ObservedParticipantId ?? string.Empty;
+                var tenantId = await _dynamo.ResolveTenantIdAsync(msTenantId).ConfigureAwait(false) ?? string.Empty;
+                var agentId = string.IsNullOrEmpty(tenantId) ? null
+                    : await _dynamo.ResolveAgentIdAsync(msTenantId, observedId).ConfigureAwait(false);
+
+                _session = new CallSession
+                {
+                    CallId = Guid.NewGuid().ToString("N"),
+                    MsCallId = call.Id,
+                    TenantId = tenantId,
+                    AgentId = agentId,
+                    Direction = "inbound",
+                    FromNumber = string.Empty,
+                    ToIdentifier = observedId,
+                    StartedAt = DateTime.UtcNow,
+                };
+
+                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId}");
+            }
+            catch (Exception ex)
+            {
+                GraphLogger.Error(ex, $"SottoInitializeSessionAsync failed for call {Call.Id}");
+            }
+        }
+
+        /// <summary>
+        /// Sotto integration: called once on CallState.Terminated. Builds a stereo WAV from
+        /// the channel-aware audio buffer, uploads to S3 under the tenant's prefix, then
+        /// publishes an SQS message so the existing Sotto pipeline (WhisperX, Bedrock, Cockpit push)
+        /// picks it up.
+        /// </summary>
+        private async Task SottoFinalizeAsync()
+        {
+            if (_sottoFinalized) return;
+            await _sottoFinalizeLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_sottoFinalized) return;
+                _sottoFinalized = true;
+
+                var session = _session ?? new CallSession
+                {
+                    CallId = Guid.NewGuid().ToString("N"),
+                    MsCallId = Call.Id,
+                    TenantId = string.Empty,
+                    Direction = "inbound",
+                    FromNumber = string.Empty,
+                    ToIdentifier = string.Empty,
+                    StartedAt = DateTime.UtcNow,
+                };
+
+                session.EndedAt = DateTime.UtcNow;
+                session.DurationSec = (int)(session.EndedAt.Value - session.StartedAt).TotalSeconds;
+
+                if (BotMediaStream == null)
+                {
+                    GraphLogger.Warn($"SottoFinalizeAsync: BotMediaStream is null for call {Call.Id}, skipping upload");
+                    return;
+                }
+
+                using var wav = BotMediaStream.SottoAudioBuffer.BuildStereoWav();
+
+                // NAudio stereo WAV header is 46 bytes; anything at or below that means no audio was captured.
+                if (wav.Length <= 46)
+                {
+                    GraphLogger.Warn($"Sotto call {session.CallId} produced no audio ({wav.Length} bytes); skipping S3 upload");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(session.TenantId))
+                {
+                    GraphLogger.Warn($"Sotto call {session.CallId} has no resolved tenant_id; uploading under empty prefix (debug only)");
+                }
+
+                var key = $"{session.TenantId}/recordings/{session.StartedAt:yyyy}/{session.StartedAt:MM}/{session.CallId}.wav";
+                session.RecordingS3Key = key;
+
+                await _uploader.UploadWavAsync(wav, key).ConfigureAwait(false);
+                await _uploader.PublishSqsMessageAsync(session).ConfigureAwait(false);
+
+                GraphLogger.Info($"Sotto call finalized: call_id={session.CallId} tenant_id={session.TenantId} s3_key={key} wav_bytes={wav.Length} duration_sec={session.DurationSec}");
+            }
+            catch (Exception ex)
+            {
+                GraphLogger.Error(ex, $"SottoFinalizeAsync failed for call {Call.Id}");
+            }
+            finally
+            {
+                _sottoFinalizeLock.Release();
             }
         }
 

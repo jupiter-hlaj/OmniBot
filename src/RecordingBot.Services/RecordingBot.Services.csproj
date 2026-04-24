@@ -25,6 +25,9 @@
         <PackageReference Include="DotNetEnv" Version="3.1.1" />
         <PackageReference Include="Microsoft.Graph.Communications.Calls.Media" Version="1.2.0.15690" />
         <PackageReference Include="System.Text.Encodings.Web" Version="10.0.1" />
+        <PackageReference Include="AWSSDK.S3" Version="3.7.305.0" />
+        <PackageReference Include="AWSSDK.SQS" Version="3.7.300.0" />
+        <PackageReference Include="AWSSDK.DynamoDBv2" Version="3.7.300.0" />
     </ItemGroup>
 
     <ItemGroup>

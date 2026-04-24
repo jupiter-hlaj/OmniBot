@@ -55,6 +55,15 @@ container:
       isStereo: false
       wavSampleRate: 0 # when it is 0, the default sample rate will be set per the stereo flag setting above
       wavQuality: 100
+    # Sotto integration: AWS destinations for call recordings.
+    # Credentials are mounted from the K8s secret named by `sottoSetting.awsCredsSecretName`.
+    sottoSetting:
+      awsRegion: "us-east-1"
+      s3Bucket: "sotto-recordings-821891894512-dev"
+      sqsUrl: "https://sqs.us-east-1.amazonaws.com/821891894512/sotto-call-events-dev"
+      dynamoTenantsTable: "sotto-tenants-dev"
+      dynamoAgentsTable: "sotto-agents-dev"
+      awsCredsSecretName: "sotto-aws-creds"
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious

@@ -5,8 +5,10 @@ using Microsoft.Graph.Communications.Common.Telemetry;
 using Microsoft.Skype.Bots.Media;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.Media;
+using SottoTeamsBot.Audio;
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
 namespace RecordingBot.Services.Bot
@@ -22,6 +24,13 @@ namespace RecordingBot.Services.Bot
         private readonly IEventPublisher _eventPublisher;
         private readonly string _callId;
         public SerializableAudioQualityOfExperienceData AudioQualityOfExperienceData { get; private set; }
+
+        /// <summary>
+        /// Sotto integration: channel-aware PCM buffer that captures every audio frame
+        /// received from Teams. Read by CallHandler on CallState.Terminated to build
+        /// the stereo WAV uploaded to S3.
+        /// </summary>
+        public AudioBuffer SottoAudioBuffer { get; } = new();
 
         public BotMediaStream(
             ILocalMediaSession mediaSession,
@@ -77,11 +86,37 @@ namespace RecordingBot.Services.Bot
             base.Dispose(disposing);
 
             _audioSocket.AudioMediaReceived -= OnAudioMediaReceived;
+
+            if (disposing)
+            {
+                SottoAudioBuffer.Dispose();
+            }
         }
 
         private async void OnAudioMediaReceived(object sender, AudioMediaReceivedEventArgs e)
         {
             GraphLogger.Info($"Received Audio: [AudioMediaReceivedEventArgs(Data=<{e.Buffer.Data}>, Length={e.Buffer.Length}, Timestamp={e.Buffer.Timestamp})]");
+
+            // Sotto integration: copy PCM samples into our own buffer before OmniBot's
+            // downstream processing disposes the native buffer. Everything goes to
+            // channel 0 (mixed audio); CallHandler builds a stereo WAV from this at
+            // call termination.
+            try
+            {
+                if (e.Buffer.Length > 0)
+                {
+                    var length = (int)e.Buffer.Length;
+                    var bytes = new byte[length];
+                    Marshal.Copy(e.Buffer.Data, bytes, 0, length);
+                    var samples = new short[length / 2];
+                    System.Buffer.BlockCopy(bytes, 0, samples, 0, length);
+                    SottoAudioBuffer.AppendSamples(0, samples, e.Buffer.Timestamp);
+                }
+            }
+            catch (Exception sottoEx)
+            {
+                GraphLogger.Error(sottoEx, "Sotto audio buffer append failed");
+            }
 
             try
             {

@@ -120,6 +120,32 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # Sotto integration: AWS destinations + credentials.
+        # Our AwsUploader and DynamoResolver read the SOTTO_* env vars via BotOptions.
+        # AWS_REGION / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are picked up by the
+        # AWS SDK default credential chain.
+        - name: AWS_REGION
+          value: "{{ .Values.container.env.sottoSetting.awsRegion }}"
+        - name: SOTTO_AWS_REGION
+          value: "{{ .Values.container.env.sottoSetting.awsRegion }}"
+        - name: SOTTO_S3_BUCKET
+          value: "{{ .Values.container.env.sottoSetting.s3Bucket }}"
+        - name: SOTTO_SQS_URL
+          value: "{{ .Values.container.env.sottoSetting.sqsUrl }}"
+        - name: SOTTO_DYNAMO_TENANTS_TABLE
+          value: "{{ .Values.container.env.sottoSetting.dynamoTenantsTable }}"
+        - name: SOTTO_DYNAMO_AGENTS_TABLE
+          value: "{{ .Values.container.env.sottoSetting.dynamoAgentsTable }}"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.container.env.sottoSetting.awsCredsSecretName }}
+              key: accessKeyId
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.container.env.sottoSetting.awsCredsSecretName }}
+              key: secretAccessKey
         resources:
           {{- toYaml .Values.resources | nindent 12 }}
       volumes:
