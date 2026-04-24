@@ -7,8 +7,10 @@ using RecordingBot.Services.Contract;
 using RecordingBot.Services.Media;
 using SottoTeamsBot.Audio;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace RecordingBot.Services.Bot
@@ -31,6 +33,12 @@ namespace RecordingBot.Services.Bot
         /// the stereo WAV uploaded to S3.
         /// </summary>
         public AudioBuffer SottoAudioBuffer { get; } = new();
+
+        // Maps each unique ActiveSpeakerId to a stereo channel (0 or 1).
+        // In compliance recording mode buffer.Data is always silence; real audio
+        // arrives in UnmixedAudioBuffers, one entry per active speaker.
+        private readonly ConcurrentDictionary<uint, int> _speakerChannelMap = new();
+        private int _nextChannel;
 
         public BotMediaStream(
             ILocalMediaSession mediaSession,
@@ -97,20 +105,30 @@ namespace RecordingBot.Services.Bot
         {
             GraphLogger.Info($"Received Audio: [AudioMediaReceivedEventArgs(Data=<{e.Buffer.Data}>, Length={e.Buffer.Length}, Timestamp={e.Buffer.Timestamp})]");
 
-            // Sotto integration: copy PCM samples into our own buffer before OmniBot's
-            // downstream processing disposes the native buffer. Everything goes to
-            // channel 0 (mixed audio); CallHandler builds a stereo WAV from this at
-            // call termination.
+            // Sotto integration: in Teams compliance recording mode, buffer.Data is always
+            // silence. Real audio arrives in UnmixedAudioBuffers — one entry per active
+            // speaker. First two distinct ActiveSpeakerIds map to channel 0 and 1.
+            // Use e.Buffer.Timestamp (arrival clock) for all entries so AlignAndInterleave
+            // can build a coherent stereo timeline across both channels.
             try
             {
-                if (e.Buffer.Length > 0)
+                if (e.Buffer.UnmixedAudioBuffers != null)
                 {
-                    var length = (int)e.Buffer.Length;
-                    var bytes = new byte[length];
-                    Marshal.Copy(e.Buffer.Data, bytes, 0, length);
-                    var samples = new short[length / 2];
-                    System.Buffer.BlockCopy(bytes, 0, samples, 0, length);
-                    SottoAudioBuffer.AppendSamples(0, samples, e.Buffer.Timestamp);
+                    foreach (var unmixed in e.Buffer.UnmixedAudioBuffers)
+                    {
+                        if (unmixed.Length <= 0) continue;
+
+                        var channel = _speakerChannelMap.GetOrAdd(
+                            unmixed.ActiveSpeakerId,
+                            _ => Math.Min(Interlocked.Increment(ref _nextChannel) - 1, 1));
+
+                        var length = (int)unmixed.Length;
+                        var bytes = new byte[length];
+                        Marshal.Copy(unmixed.Data, bytes, 0, length);
+                        var samples = new short[length / 2];
+                        System.Buffer.BlockCopy(bytes, 0, samples, 0, length);
+                        SottoAudioBuffer.AppendSamples(channel, samples, e.Buffer.Timestamp);
+                    }
                 }
             }
             catch (Exception sottoEx)
