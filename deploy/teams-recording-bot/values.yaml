@@ -41,7 +41,7 @@ node:
   targetArch: amd64
   targetSku: Windows2022
 
-terminationGracePeriod: 54000
+terminationGracePeriod: 0
 
 container:
   env:
