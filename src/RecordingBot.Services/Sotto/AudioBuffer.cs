@@ -59,9 +59,7 @@ public sealed class AudioBuffer : IDisposable
 
     public MemoryStream BuildStereoWav()
     {
-        var ch0 = CollectAllFrames(0);
-        var ch1 = CollectAllFrames(1);
-        var stereo = AlignAndInterleave(ch0, ch1);
+        var stereo = BuildStereoPcm16k();
 
         var ms = new MemoryStream();
         using (var writer = new WaveFileWriter(ms, new WaveFormat(SampleRate, BitsPerSample, 2)))
@@ -75,6 +73,21 @@ public sealed class AudioBuffer : IDisposable
         // MemoryStream.ToArray() works even after the stream is disposed.
         return new MemoryStream(ms.ToArray());
     }
+
+    /// <summary>
+    /// Returns interleaved stereo PCM samples (16 kHz, 16-bit signed) at the rate
+    /// the Skype.Bots.Media SDK delivered them. Channel 0 = first speaker captured,
+    /// channel 1 = second speaker. Use this as the source for any encoder/transcoder.
+    /// </summary>
+    public short[] BuildStereoPcm16k()
+    {
+        var ch0 = CollectAllFrames(0);
+        var ch1 = CollectAllFrames(1);
+        return AlignAndInterleave(ch0, ch1);
+    }
+
+    public const int NativeSampleRate = SampleRate;
+    public const int NativeBitsPerSample = BitsPerSample;
 
     private List<(long Timestamp, short[] Samples)> CollectAllFrames(int channel)
     {

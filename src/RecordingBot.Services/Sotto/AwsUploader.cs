@@ -25,13 +25,13 @@ public sealed class AwsUploader
         _sqsUrl = options.Value.SqsUrl;
     }
 
-    public async Task UploadWavAsync(Stream stream, string s3Key)
+    public async Task UploadAsync(Stream stream, string s3Key, string contentType)
     {
         var initResponse = await _s3.InitiateMultipartUploadAsync(new InitiateMultipartUploadRequest
         {
             BucketName = _bucket,
             Key = s3Key,
-            ContentType = "audio/wav"
+            ContentType = contentType
         });
 
         var uploadId = initResponse.UploadId;
@@ -61,7 +61,7 @@ public sealed class AwsUploader
             }
 
             if (partETags.Count == 0)
-                throw new InvalidOperationException("Cannot upload an empty WAV stream.");
+                throw new InvalidOperationException("Cannot upload an empty audio stream.");
 
             await _s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
             {

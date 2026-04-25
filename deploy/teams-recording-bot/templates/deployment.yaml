@@ -136,6 +136,16 @@ spec:
           value: "{{ .Values.container.env.sottoSetting.dynamoTenantsTable }}"
         - name: SOTTO_DYNAMO_AGENTS_TABLE
           value: "{{ .Values.container.env.sottoSetting.dynamoAgentsTable }}"
+        # Audio output format. Defaults inside the bot are stereo MP3 at 16 kHz, 64 kbps.
+        # Override any of these to change file size / quality / channel layout without rebuilding.
+        - name: Sotto__AudioFormat__Codec
+          value: "{{ .Values.container.env.sottoSetting.audioCodec | default "mp3" }}"
+        - name: Sotto__AudioFormat__SampleRate
+          value: "{{ .Values.container.env.sottoSetting.audioSampleRate | default "16000" }}"
+        - name: Sotto__AudioFormat__BitrateKbps
+          value: "{{ .Values.container.env.sottoSetting.audioBitrateKbps | default "64" }}"
+        - name: Sotto__AudioFormat__Channels
+          value: "{{ .Values.container.env.sottoSetting.audioChannels | default "2" }}"
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:

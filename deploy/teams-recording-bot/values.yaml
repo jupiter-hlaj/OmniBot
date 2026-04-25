@@ -64,6 +64,12 @@ container:
       dynamoTenantsTable: "sotto-tenants-dev"
       dynamoAgentsTable: "sotto-agents-dev"
       awsCredsSecretName: "sotto-aws-creds"
+      # Audio output format -- defaults to stereo MP3 at 16 kHz, 64 kbps (~5 MB per 10-min call).
+      # Override any field to change file size / quality / channels without rebuilding the image.
+      audioCodec: "mp3"           # "mp3" or "wav"
+      audioSampleRate: "16000"    # 16000 native; 8000 cuts size further at the cost of frequency range
+      audioBitrateKbps: "64"      # MP3 only; 32 = smaller, 96/128 = higher fidelity
+      audioChannels: "2"          # 2 keeps speaker-per-channel labeling; 1 = mixed mono
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious

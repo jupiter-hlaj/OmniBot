@@ -7,6 +7,7 @@ using RecordingBot.Model.Constants;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.ServiceSetup;
 using RecordingBot.Services.Util;
+using SottoTeamsBot.Audio;
 using SottoTeamsBot.Aws;
 using SottoTeamsBot.Calls;
 using System;
@@ -30,6 +31,7 @@ namespace RecordingBot.Services.Bot
         // Sotto integration: dependencies + session state for S3 upload and SQS enqueue.
         private readonly DynamoResolver _dynamo;
         private readonly AwsUploader _uploader;
+        private readonly AudioEncoder _encoder;
         private CallSession _session;
         private bool _sottoFinalized;
         private readonly SemaphoreSlim _sottoFinalizeLock = new(1, 1);
@@ -37,12 +39,13 @@ namespace RecordingBot.Services.Bot
         public ICall Call { get; }
         public BotMediaStream BotMediaStream { get; private set; }
 
-        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher, DynamoResolver dynamo, AwsUploader uploader) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
+        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
         {
             _settings = (AzureSettings)settings;
             _eventPublisher = eventPublisher;
             _dynamo = dynamo;
             _uploader = uploader;
+            _encoder = encoder;
 
             Call = statefulCall;
             Call.OnUpdated += CallOnUpdated;
@@ -233,12 +236,12 @@ namespace RecordingBot.Services.Bot
                     return;
                 }
 
-                using var wav = BotMediaStream.SottoAudioBuffer.BuildStereoWav();
+                using var audio = _encoder.Encode(BotMediaStream.SottoAudioBuffer);
 
-                // NAudio stereo WAV header is 46 bytes; anything at or below that means no audio was captured.
-                if (wav.Length <= 46)
+                // Encoded stream is empty when no audio was captured.
+                if (audio.Length == 0)
                 {
-                    GraphLogger.Warn($"Sotto call {session.CallId} produced no audio ({wav.Length} bytes); skipping S3 upload");
+                    GraphLogger.Warn($"Sotto call {session.CallId} produced no audio; skipping S3 upload");
                     return;
                 }
 
@@ -247,13 +250,14 @@ namespace RecordingBot.Services.Bot
                     GraphLogger.Warn($"Sotto call {session.CallId} has no resolved tenant_id; uploading under empty prefix (debug only)");
                 }
 
-                var key = $"{session.TenantId}/recordings/{session.StartedAt:yyyy}/{session.StartedAt:MM}/{session.CallId}.wav";
+                var ext = _encoder.Options.FileExtension;
+                var key = $"{session.TenantId}/recordings/{session.StartedAt:yyyy}/{session.StartedAt:MM}/{session.CallId}.{ext}";
                 session.RecordingS3Key = key;
 
-                await _uploader.UploadWavAsync(wav, key).ConfigureAwait(false);
+                await _uploader.UploadAsync(audio, key, _encoder.Options.ContentType).ConfigureAwait(false);
                 await _uploader.PublishSqsMessageAsync(session).ConfigureAwait(false);
 
-                GraphLogger.Info($"Sotto call finalized: call_id={session.CallId} tenant_id={session.TenantId} s3_key={key} wav_bytes={wav.Length} duration_sec={session.DurationSec}");
+                GraphLogger.Info($"Sotto call finalized: call_id={session.CallId} tenant_id={session.TenantId} s3_key={key} bytes={audio.Length} duration_sec={session.DurationSec} format={_encoder.Options.Codec}/{_encoder.Options.SampleRate}Hz/{_encoder.Options.Channels}ch/{_encoder.Options.BitrateKbps}kbps");
             }
             catch (Exception ex)
             {

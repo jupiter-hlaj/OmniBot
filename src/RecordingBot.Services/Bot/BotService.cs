@@ -12,6 +12,7 @@ using RecordingBot.Services.Authentication;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.ServiceSetup;
 using RecordingBot.Services.Util;
+using SottoTeamsBot.Audio;
 using SottoTeamsBot.Aws;
 using System;
 using System.Collections.Concurrent;
@@ -26,6 +27,7 @@ namespace RecordingBot.Services.Bot
         private readonly AzureSettings _settings;
         private readonly DynamoResolver _dynamo;
         private readonly AwsUploader _uploader;
+        private readonly AudioEncoder _encoder;
 
         public ConcurrentDictionary<string, CallHandler> CallHandlers { get; } = [];
         private ICommunicationsClient _client;
@@ -42,13 +44,14 @@ namespace RecordingBot.Services.Bot
             }
         }
 
-        public BotService(IGraphLogger logger, IEventPublisher eventPublisher, IAzureSettings settings, DynamoResolver dynamo, AwsUploader uploader)
+        public BotService(IGraphLogger logger, IEventPublisher eventPublisher, IAzureSettings settings, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder)
         {
             _logger = logger;
             _eventPublisher = eventPublisher;
             _settings = (AzureSettings)settings;
             _dynamo = dynamo;
             _uploader = uploader;
+            _encoder = encoder;
         }
 
         public void Initialize()
@@ -164,7 +167,7 @@ namespace RecordingBot.Services.Bot
         {
             foreach (var call in args.AddedResources)
             {
-                CallHandlers[call.Id] = new CallHandler(call, _settings, _eventPublisher, _dynamo, _uploader);
+                CallHandlers[call.Id] = new CallHandler(call, _settings, _eventPublisher, _dynamo, _uploader, _encoder);
             }
 
             foreach (var call in args.RemovedResources)

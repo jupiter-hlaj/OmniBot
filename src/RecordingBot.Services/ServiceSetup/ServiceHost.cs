@@ -9,6 +9,7 @@ using Microsoft.Graph.Communications.Common.Telemetry;
 using RecordingBot.Services.Bot;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.Util;
+using SottoTeamsBot.Audio;
 using SottoTeamsBot.Aws;
 using SottoTeamsBot.Bot;
 using System;
@@ -37,11 +38,13 @@ namespace RecordingBot.Services.ServiceSetup
             // AWS SDK picks up credentials from env vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
             // and region from AWS_REGION. Set via K8s secret + Helm values.
             Services.Configure<BotOptions>(_ => { });
+            Services.Configure<AudioFormatOptions>(configuration.GetSection("Sotto:AudioFormat"));
             Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client());
             Services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient());
             Services.AddSingleton<IAmazonDynamoDB>(_ => new AmazonDynamoDBClient());
             Services.AddSingleton<AwsUploader>();
             Services.AddSingleton<DynamoResolver>();
+            Services.AddSingleton<AudioEncoder>();
 
             return this;
         }
