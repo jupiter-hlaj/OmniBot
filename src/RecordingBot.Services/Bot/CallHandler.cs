@@ -265,7 +265,11 @@ namespace RecordingBot.Services.Bot
             }
             finally
             {
-                _sottoFinalizeLock.Release();
+                // CallOnUpdated is async void so the SDK does not await us; if
+                // CallHandler.Dispose runs while our S3 upload is in flight, the
+                // semaphore is already disposed by the time we reach this Release.
+                try { _sottoFinalizeLock.Release(); }
+                catch (ObjectDisposedException) { }
             }
         }
 
