@@ -181,12 +181,13 @@ namespace RecordingBot.Services.Bot
                 var agentId = string.IsNullOrEmpty(tenantId) ? null
                     : await _dynamo.ResolveAgentIdAsync(msTenantId, observedId).ConfigureAwait(false);
 
-                // Extract the OTHER party's display name + UPN from
-                // call.Resource.Source.Identity. For inbound calls Source is
-                // the caller; the recorded user is in Targets/IncomingContext.
-                // We tolerate every identity type being null — falls through
-                // to empty strings, frontend then renders "Unknown" gracefully.
-                var (fromDisplay, fromUpn) = ExtractSourceIdentity(call);
+                // Extract the OTHER party's identity. For compliance recording
+                // the bot's call.Source is typically the recorded user themselves
+                // (the user being observed), so we look at Targets first and
+                // skip any identity matching observedId. Returns:
+                //   PSTN identities → fromNumber populated (E.164)
+                //   Teams users     → fromDisplay + fromUpn populated
+                var (fromNumber, fromDisplay, fromUpn) = ExtractFromIdentity(call, observedId);
 
                 _session = new CallSession
                 {
@@ -195,14 +196,14 @@ namespace RecordingBot.Services.Bot
                     TenantId = tenantId,
                     AgentId = agentId,
                     Direction = "inbound",
-                    FromNumber = string.Empty,
+                    FromNumber = fromNumber,
                     FromDisplay = fromDisplay,
                     FromUpn = fromUpn,
                     ToIdentifier = observedId,
                     StartedAt = DateTime.UtcNow,
                 };
 
-                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
+                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} from_number=\"{fromNumber}\" from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
             }
             catch (Exception ex)
             {
@@ -211,53 +212,103 @@ namespace RecordingBot.Services.Bot
         }
 
         /// <summary>
-        /// Best-effort extraction of the "from" party's display name + UPN from
-        /// call.Resource.Source.Identity. Tries User identity first (Teams users
-        /// — meetings, Teams-to-Teams), then falls back to AdditionalData scan
-        /// for phone identities (PSTN inbound). Returns empty strings on any
-        /// failure — caller treats empty as "unknown".
+        /// Best-effort extraction of the OTHER party's display name + UPN — i.e.
+        /// the caller for inbound, the callee for outbound, the meeting peer for
+        /// meetings. Strategy:
+        ///   1. Iterate call.Resource.Targets, take the first identity that
+        ///      isn't the observed/recorded user.
+        ///   2. Fallback to call.Resource.Source if no qualifying target found
+        ///      (some flows put the external caller on Source instead).
+        ///   3. Skip any identity matching observedUserId so the recorded user
+        ///      themselves never gets returned as the "from" party.
+        /// Each identity-extraction attempt handles User (Teams users) and
+        /// AdditionalData["phone"] (PSTN). Returns empty strings on no match.
         /// </summary>
-        private static (string displayName, string upn) ExtractSourceIdentity(ICall call)
+        private static (string fromNumber, string displayName, string upn) ExtractFromIdentity(ICall call, string observedUserId)
         {
             try
             {
-                var identity = call.Resource?.Source?.Identity;
-                if (identity == null) return (string.Empty, string.Empty);
-
-                if (identity.User != null)
+                // 1) Try Targets first — for compliance recording these are
+                //    typically the participants other than the recorded user.
+                var targets = call.Resource?.Targets;
+                if (targets != null)
                 {
-                    var displayName = identity.User.DisplayName ?? string.Empty;
-                    var upn = string.Empty;
-                    // UPN lives in AdditionalData under "userPrincipalName"
-                    if (identity.User.AdditionalData != null &&
-                        identity.User.AdditionalData.TryGetValue("userPrincipalName", out var upnObj))
+                    foreach (var target in targets)
                     {
-                        upn = upnObj?.ToString() ?? string.Empty;
+                        var triple = TryExtractFromIdentitySet(target?.Identity, observedUserId);
+                        if (!string.IsNullOrEmpty(triple.fromNumber) || !string.IsNullOrEmpty(triple.displayName) || !string.IsNullOrEmpty(triple.upn))
+                            return triple;
                     }
-                    if (string.IsNullOrEmpty(upn))
-                    {
-                        upn = identity.User.Id ?? string.Empty;
-                    }
-                    return (displayName, upn);
                 }
 
-                // Phone identity (PSTN) is exposed under AdditionalData["phone"]
-                // with shape { id: "+15551234567", displayName: "..." }.
-                if (identity.AdditionalData != null &&
-                    identity.AdditionalData.TryGetValue("phone", out var phoneObj) &&
-                    phoneObj is System.Text.Json.JsonElement phoneEl &&
-                    phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
-                {
-                    var dn = phoneEl.TryGetProperty("displayName", out var dnEl) ? dnEl.GetString() ?? string.Empty : string.Empty;
-                    var id = phoneEl.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty;
-                    return (dn, id);
-                }
+                // 2) Fallback to Source — some PSTN flows put the external
+                //    caller here. Skip if it matches the observed user.
+                var s = TryExtractFromIdentitySet(call.Resource?.Source?.Identity, observedUserId);
+                if (!string.IsNullOrEmpty(s.fromNumber) || !string.IsNullOrEmpty(s.displayName) || !string.IsNullOrEmpty(s.upn))
+                    return s;
             }
             catch
             {
                 // Defensive: any reflection / null / cast issue → empty.
             }
-            return (string.Empty, string.Empty);
+            return (string.Empty, string.Empty, string.Empty);
+        }
+
+        /// <summary>
+        /// Extract (displayName, upn-or-phone) from a Microsoft Graph IdentitySet,
+        /// returning empty strings if the identity matches observedUserId or no
+        /// recognizable identity type is present. User identity wins; falls back
+        /// to AdditionalData["phone"] for PSTN parties.
+        /// </summary>
+        private static (string fromNumber, string displayName, string upn) TryExtractFromIdentitySet(
+            Microsoft.Graph.IdentitySet identitySet, string observedUserId)
+        {
+            if (identitySet == null) return (string.Empty, string.Empty, string.Empty);
+
+            // User identity (Teams users) — no phone number, just display + UPN.
+            if (identitySet.User != null)
+            {
+                var userId = identitySet.User.Id ?? string.Empty;
+                // Skip the recorded user themselves
+                if (!string.IsNullOrEmpty(observedUserId) && userId == observedUserId)
+                {
+                    return (string.Empty, string.Empty, string.Empty);
+                }
+                var displayName = identitySet.User.DisplayName ?? string.Empty;
+                var upn = string.Empty;
+                if (identitySet.User.AdditionalData != null &&
+                    identitySet.User.AdditionalData.TryGetValue("userPrincipalName", out var upnObj))
+                {
+                    upn = upnObj?.ToString() ?? string.Empty;
+                }
+                if (string.IsNullOrEmpty(upn)) upn = userId;
+                return (string.Empty, displayName, upn);
+            }
+
+            // Phone identity (PSTN) under AdditionalData["phone"]:
+            //   { "id": "+15551234567", "displayName": "..." }
+            // We surface the phone number to BOTH from_number (so the UI
+            // renders the number directly) and copy displayName when present
+            // (CNAM, if Microsoft delivers it).
+            if (identitySet.AdditionalData != null &&
+                identitySet.AdditionalData.TryGetValue("phone", out var phoneObj) &&
+                phoneObj is System.Text.Json.JsonElement phoneEl &&
+                phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                var dn = phoneEl.TryGetProperty("displayName", out var dnEl) ? dnEl.GetString() ?? string.Empty : string.Empty;
+                var id = phoneEl.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty;
+                if (!string.IsNullOrEmpty(id) || !string.IsNullOrEmpty(dn)) return (id, dn, string.Empty);
+            }
+
+            // Older shape: AdditionalData["phoneNumber"] direct E.164 string.
+            if (identitySet.AdditionalData != null &&
+                identitySet.AdditionalData.TryGetValue("phoneNumber", out var phoneNumObj))
+            {
+                var phoneNum = phoneNumObj?.ToString() ?? string.Empty;
+                if (!string.IsNullOrEmpty(phoneNum)) return (phoneNum, string.Empty, string.Empty);
+            }
+
+            return (string.Empty, string.Empty, string.Empty);
         }
 
         /// <summary>
