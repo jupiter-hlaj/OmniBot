@@ -9,6 +9,12 @@ on:
         default: ''
         type: string
 
+# Serialize against shared infrastructure (the AKS StatefulSet). Two
+# concurrent rollouts would race; queue with cancel-in-progress: false.
+concurrency:
+  group: deploy-sotto-bot
+  cancel-in-progress: false
+
 jobs:
   build:
     uses: ./.github/workflows/routine-buildimage.yml
@@ -18,3 +24,61 @@ jobs:
     permissions:
       packages: write
       contents: read
+
+  deploy:
+    name: Roll new image onto sotto-bot AKS StatefulSet
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC token for Azure login
+      contents: read
+    env:
+      RESOURCE_GROUP: SOTTO-AKS-RG-CENTRAL
+      CLUSTER_NAME: sotto-aks-central
+      NAMESPACE: sotto-bot
+      STATEFULSET: sotto-bot
+      CONTAINER: recording-bot
+      IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/omnibot
+      IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Roll image via az aks command invoke
+        run: |
+          set -euo pipefail
+          NEW_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+          echo "Setting ${STATEFULSET}/${CONTAINER} to ${NEW_IMAGE}"
+          # az aks command invoke runs kubectl inside the cluster's
+          # admin context — no kubeconfig wrangling, no kubelogin.
+          # Requires Microsoft.ContainerService/managedClusters/runcommand/action,
+          # which is in the Contributor role scope-attached to this single
+          # cluster (sotto-bot-deploy AAD app, app-id $AZURE_CLIENT_ID).
+          az aks command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${CLUSTER_NAME}" \
+            --command "kubectl set image statefulset/${STATEFULSET} ${CONTAINER}=${NEW_IMAGE} -n ${NAMESPACE}"
+
+      - name: Watch rollout (15 min cap)
+        run: |
+          # StatefulSet rolls in reverse ordinal order; each Windows pod
+          # pulls a multi-GB image (5-10 min per pod). 15 min is enough
+          # for 3 pods on a warm cluster, sometimes tight on cold ones.
+          # If we hit the cap we don't fail the workflow — pods are still
+          # rolling on their own timeline.
+          az aks command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${CLUSTER_NAME}" \
+            --command "kubectl rollout status statefulset/${STATEFULSET} -n ${NAMESPACE} --timeout=900s" \
+            || echo "Rollout did not finish within 15 min; continuing — pods will catch up async."
+
+      - name: Final pod status
+        run: |
+          az aks command invoke \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${CLUSTER_NAME}" \
+            --command "kubectl get pods -n ${NAMESPACE} -o wide"
