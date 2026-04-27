@@ -181,6 +181,13 @@ namespace RecordingBot.Services.Bot
                 var agentId = string.IsNullOrEmpty(tenantId) ? null
                     : await _dynamo.ResolveAgentIdAsync(msTenantId, observedId).ConfigureAwait(false);
 
+                // Extract the OTHER party's display name + UPN from
+                // call.Resource.Source.Identity. For inbound calls Source is
+                // the caller; the recorded user is in Targets/IncomingContext.
+                // We tolerate every identity type being null — falls through
+                // to empty strings, frontend then renders "Unknown" gracefully.
+                var (fromDisplay, fromUpn) = ExtractSourceIdentity(call);
+
                 _session = new CallSession
                 {
                     CallId = Guid.NewGuid().ToString("N"),
@@ -189,16 +196,68 @@ namespace RecordingBot.Services.Bot
                     AgentId = agentId,
                     Direction = "inbound",
                     FromNumber = string.Empty,
+                    FromDisplay = fromDisplay,
+                    FromUpn = fromUpn,
                     ToIdentifier = observedId,
                     StartedAt = DateTime.UtcNow,
                 };
 
-                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId}");
+                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
             }
             catch (Exception ex)
             {
                 GraphLogger.Error(ex, $"SottoInitializeSessionAsync failed for call {Call.Id}");
             }
+        }
+
+        /// <summary>
+        /// Best-effort extraction of the "from" party's display name + UPN from
+        /// call.Resource.Source.Identity. Tries User identity first (Teams users
+        /// — meetings, Teams-to-Teams), then falls back to AdditionalData scan
+        /// for phone identities (PSTN inbound). Returns empty strings on any
+        /// failure — caller treats empty as "unknown".
+        /// </summary>
+        private static (string displayName, string upn) ExtractSourceIdentity(ICall call)
+        {
+            try
+            {
+                var identity = call.Resource?.Source?.Identity;
+                if (identity == null) return (string.Empty, string.Empty);
+
+                if (identity.User != null)
+                {
+                    var displayName = identity.User.DisplayName ?? string.Empty;
+                    var upn = string.Empty;
+                    // UPN lives in AdditionalData under "userPrincipalName"
+                    if (identity.User.AdditionalData != null &&
+                        identity.User.AdditionalData.TryGetValue("userPrincipalName", out var upnObj))
+                    {
+                        upn = upnObj?.ToString() ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(upn))
+                    {
+                        upn = identity.User.Id ?? string.Empty;
+                    }
+                    return (displayName, upn);
+                }
+
+                // Phone identity (PSTN) is exposed under AdditionalData["phone"]
+                // with shape { id: "+15551234567", displayName: "..." }.
+                if (identity.AdditionalData != null &&
+                    identity.AdditionalData.TryGetValue("phone", out var phoneObj) &&
+                    phoneObj is System.Text.Json.JsonElement phoneEl &&
+                    phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    var dn = phoneEl.TryGetProperty("displayName", out var dnEl) ? dnEl.GetString() ?? string.Empty : string.Empty;
+                    var id = phoneEl.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty;
+                    return (dn, id);
+                }
+            }
+            catch
+            {
+                // Defensive: any reflection / null / cast issue → empty.
+            }
+            return (string.Empty, string.Empty);
         }
 
         /// <summary>

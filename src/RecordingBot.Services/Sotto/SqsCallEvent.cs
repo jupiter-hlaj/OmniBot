@@ -19,6 +19,8 @@ public sealed class SqsCallEvent
     public string ProviderCallId { get; init; } = string.Empty;
     public string Direction { get; init; } = string.Empty;
     public string FromNumber { get; init; } = string.Empty;
+    public string FromDisplay { get; init; } = string.Empty;
+    public string FromUpn { get; init; } = string.Empty;
     public string ToIdentifier { get; init; } = string.Empty;
     public int DurationSec { get; init; }
     public string RecordingUrl { get; init; } = string.Empty;
@@ -47,6 +49,8 @@ public sealed class SqsCallEvent
         ProviderCallId = session.MsCallId,
         Direction = session.Direction,
         FromNumber = session.FromNumber,
+        FromDisplay = session.FromDisplay,
+        FromUpn = session.FromUpn,
         ToIdentifier = session.ToIdentifier,
         DurationSec = session.DurationSec,
         RecordingUrl = string.Empty,
