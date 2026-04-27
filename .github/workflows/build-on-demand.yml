@@ -1,6 +1,14 @@
 name: Build On Demand
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build/**'
+      - 'scripts/**'
+      - '.github/workflows/build-on-demand.yml'
+      - '.github/workflows/routine-buildimage.yml'
   workflow_dispatch:
     inputs:
       tag:
