@@ -478,6 +478,106 @@ namespace RecordingBot.Services.Bot
 
             UpdateParticipants(args.AddedResources);
             UpdateParticipants(args.RemovedResources, false);
+
+            // Sotto: extract the OTHER party's identity from the participants
+            // collection. For compliance recording, call.Resource.Source is
+            // ALWAYS the recorded user (Microsoft creates a separate P2P leg
+            // bot↔recorded-user), so the actual external caller never appears
+            // there. The PSTN caller / meeting peer only shows up in
+            // Call.Participants. Algorithm:
+            //   1. Skip participants whose Id matches IncomingContext
+            //      .ObservedParticipantId (the recorded user themselves).
+            //   2. Skip participants with applicationInstance identity
+            //      (the bot itself).
+            //   3. Phone identity (PSTN) under AdditionalData["phone"] wins
+            //      over Teams user identity — phone is the more specific
+            //      caller-id signal for inbound PSTN.
+            //   4. First non-empty match sticks; subsequent participants
+            //      don't overwrite (avoids late-joining meeting attendees
+            //      replacing the original caller).
+            // Findings sourced from research summarized in docs/teams-engine-b-runbook.md.
+            SottoTryUpdateFromIdentity(args.AddedResources);
+        }
+
+        private void SottoTryUpdateFromIdentity(ICollection<IParticipant> added)
+        {
+            if (_session == null) return;
+            // Phone wins: once we have a phone number, we stop overwriting.
+            if (!string.IsNullOrEmpty(_session.FromNumber)) return;
+
+            var observedId = _session.ToIdentifier ?? string.Empty;
+
+            foreach (var participant in added)
+            {
+                try
+                {
+                    var resource = participant?.Resource;
+                    var identity = resource?.Info?.Identity;
+                    if (resource == null || identity == null) continue;
+
+                    // Skip the recorded user themselves
+                    if (!string.IsNullOrEmpty(observedId) && resource.Id == observedId) continue;
+
+                    // Skip the bot itself
+                    if (identity.AdditionalData != null &&
+                        identity.AdditionalData.ContainsKey("applicationInstance"))
+                    {
+                        continue;
+                    }
+
+                    // 1) Phone identity (PSTN external caller) — highest priority
+                    if (identity.AdditionalData != null &&
+                        identity.AdditionalData.TryGetValue("phone", out var phoneObj) &&
+                        phoneObj is System.Text.Json.JsonElement phoneEl &&
+                        phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        var num = phoneEl.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty;
+                        var dn  = phoneEl.TryGetProperty("displayName", out var dnEl) ? dnEl.GetString() ?? string.Empty : string.Empty;
+                        if (!string.IsNullOrEmpty(num))
+                        {
+                            _session = _session with
+                            {
+                                FromNumber  = num,
+                                FromDisplay = dn,
+                                FromUpn     = string.Empty,
+                            };
+                            GraphLogger.Info($"Sotto: phone caller extracted from participant — number={num} cnam=\"{dn}\" call={Call.Id}");
+                            return;
+                        }
+                    }
+
+                    // 2) Teams user (only used if we don't already have a User
+                    //    set AND no phone has won yet for this call).
+                    if (identity.User != null && string.IsNullOrEmpty(_session.FromUpn))
+                    {
+                        var displayName = identity.User.DisplayName ?? string.Empty;
+                        var upn = string.Empty;
+                        if (identity.User.AdditionalData != null &&
+                            identity.User.AdditionalData.TryGetValue("userPrincipalName", out var upnObj))
+                        {
+                            upn = upnObj?.ToString() ?? string.Empty;
+                        }
+                        if (string.IsNullOrEmpty(upn)) upn = identity.User.Id ?? string.Empty;
+
+                        if (!string.IsNullOrEmpty(displayName) || !string.IsNullOrEmpty(upn))
+                        {
+                            _session = _session with
+                            {
+                                FromNumber  = string.Empty,
+                                FromDisplay = displayName,
+                                FromUpn     = upn,
+                            };
+                            GraphLogger.Info($"Sotto: Teams user extracted from participant — display=\"{displayName}\" upn={upn} call={Call.Id}");
+                            // Don't return — keep iterating in case a phone
+                            // identity arrives later in the same batch.
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    GraphLogger.Warn($"SottoTryUpdateFromIdentity: failed on a participant — {ex.Message}");
+                }
+            }
         }
 
         private static bool CheckParticipantIsUsable(IParticipant p)
