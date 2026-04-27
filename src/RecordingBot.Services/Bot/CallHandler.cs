@@ -261,7 +261,7 @@ namespace RecordingBot.Services.Bot
         /// to AdditionalData["phone"] for PSTN parties.
         /// </summary>
         private static (string fromNumber, string displayName, string upn) TryExtractFromIdentitySet(
-            Microsoft.Graph.IdentitySet identitySet, string observedUserId)
+            Microsoft.Graph.Models.IdentitySet identitySet, string observedUserId)
         {
             if (identitySet == null) return (string.Empty, string.Empty, string.Empty);
 
