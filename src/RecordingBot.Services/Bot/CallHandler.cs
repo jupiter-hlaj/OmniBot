@@ -189,6 +189,33 @@ namespace RecordingBot.Services.Bot
                 //   Teams users     → fromDisplay + fromUpn populated
                 var (fromNumber, fromDisplay, fromUpn) = ExtractFromIdentity(call, observedId);
 
+                // DIAGNOSTIC: dump Source + Targets identity shapes so we can
+                // see what Microsoft puts in each field for different call
+                // types (PSTN, meeting, federated). Logged once per call init;
+                // safe to keep on for now since identity is not sensitive
+                // beyond what we already log (UPN, display name).
+                try
+                {
+                    var sourceJson = System.Text.Json.JsonSerializer.Serialize(call.Resource?.Source?.Identity, new System.Text.Json.JsonSerializerOptions { WriteIndented = false });
+                    GraphLogger.Info($"DIAG Source.Identity for {call.Id}: {sourceJson}");
+                    if (call.Resource?.Targets != null)
+                    {
+                        int idx = 0;
+                        foreach (var t in call.Resource.Targets)
+                        {
+                            var targetJson = System.Text.Json.JsonSerializer.Serialize(t?.Identity, new System.Text.Json.JsonSerializerOptions { WriteIndented = false });
+                            GraphLogger.Info($"DIAG Targets[{idx}].Identity for {call.Id}: {targetJson}");
+                            idx++;
+                        }
+                    } else {
+                        GraphLogger.Info($"DIAG Targets for {call.Id}: <null>");
+                    }
+                }
+                catch (Exception diagEx)
+                {
+                    GraphLogger.Warn($"DIAG dump failed for {call.Id}: {diagEx.Message}");
+                }
+
                 _session = new CallSession
                 {
                     CallId = Guid.NewGuid().ToString("N"),
