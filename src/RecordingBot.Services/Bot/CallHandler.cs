@@ -177,6 +177,40 @@ namespace RecordingBot.Services.Bot
             {
                 var msTenantId = call.Resource?.TenantId ?? string.Empty;
                 var observedId = call.Resource?.IncomingContext?.ObservedParticipantId ?? string.Empty;
+
+                // DIAG: dump the participants roster at Established time. Per
+                // Microsoft Graph schema (identitySet), the inbound PSTN E.164
+                // SHOULD appear as a `phone` identity on one of the participants.
+                // We've confirmed it's NOT in Source.Identity, Targets[].Identity,
+                // or IncomingContext — Participants[] is the last documented
+                // surface. Read-only diagnostic; logs JSON for offline analysis.
+                try
+                {
+                    var pcount = 0;
+                    foreach (var p in Call.Participants)
+                    {
+                        pcount++;
+                        var resource = p?.Resource;
+                        var idJson = "<null>";
+                        try
+                        {
+                            idJson = System.Text.Json.JsonSerializer.Serialize(
+                                resource?.Info?.Identity,
+                                new System.Text.Json.JsonSerializerOptions { WriteIndented = false });
+                        }
+                        catch (Exception sex)
+                        {
+                            idJson = $"<serialize_failed: {sex.Message}>";
+                        }
+                        GraphLogger.Info($"DIAG Participant[init] id={resource?.Id ?? "<null>"} identity={idJson} call={Call.Id}");
+                    }
+                    GraphLogger.Info($"DIAG Participants[init] total_at_established={pcount} call={Call.Id}");
+                }
+                catch (Exception diagEx)
+                {
+                    GraphLogger.Warn($"DIAG Participants[init] dump failed for {Call.Id}: {diagEx.Message}");
+                }
+
                 var tenantId = await _dynamo.ResolveTenantIdAsync(msTenantId).ConfigureAwait(false) ?? string.Empty;
                 var agentId = string.IsNullOrEmpty(tenantId) ? null
                     : await _dynamo.ResolveAgentIdAsync(msTenantId, observedId).ConfigureAwait(false);
@@ -447,6 +481,36 @@ namespace RecordingBot.Services.Bot
             if (_settings.CaptureEvents)
             {
                 _capture?.Append(args);
+            }
+
+            // DIAG: log every added/updated/removed participant's full identity
+            // unfiltered. Companion to the SottoInitializeSessionAsync init dump:
+            // catches participants that arrive AFTER Established. The goal is to
+            // observe whether a `phone` identity ever appears for inbound PSTN.
+            try
+            {
+                foreach (var p in args.AddedResources ?? new List<IParticipant>())
+                {
+                    var resource = p?.Resource;
+                    string idJson = "<null>";
+                    try
+                    {
+                        idJson = System.Text.Json.JsonSerializer.Serialize(
+                            resource?.Info?.Identity,
+                            new System.Text.Json.JsonSerializerOptions { WriteIndented = false });
+                    }
+                    catch (Exception sex) { idJson = $"<serialize_failed: {sex.Message}>"; }
+                    GraphLogger.Info($"DIAG Participant[added] id={resource?.Id ?? "<null>"} identity={idJson} call={Call.Id}");
+                }
+                foreach (var p in args.RemovedResources ?? new List<IParticipant>())
+                {
+                    var resource = p?.Resource;
+                    GraphLogger.Info($"DIAG Participant[removed] id={resource?.Id ?? "<null>"} call={Call.Id}");
+                }
+            }
+            catch (Exception diagEx)
+            {
+                GraphLogger.Warn($"DIAG Participant update dump failed for {Call.Id}: {diagEx.Message}");
             }
 
             UpdateParticipants(args.AddedResources);
