@@ -12,6 +12,7 @@ using SottoTeamsBot.Aws;
 using SottoTeamsBot.Calls;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -238,6 +239,14 @@ namespace RecordingBot.Services.Bot
                 };
 
                 GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} from_number=\"{fromNumber}\" from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
+
+                // Race-condition cover: participants that arrived via
+                // OnUpdated while init was awaiting DynamoDB lookups (cert
+                // auth + tenant resolve + agent resolve) saw _session==null
+                // and the phone-identity extractor silently returned. Now
+                // that _session is set, sweep the current roster for any
+                // phone identity we missed during the async init window.
+                SottoTryUpdateFromPhoneIdentity(Call.Participants?.ToList());
             }
             catch (Exception ex)
             {
