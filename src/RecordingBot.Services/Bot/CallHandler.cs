@@ -513,8 +513,65 @@ namespace RecordingBot.Services.Bot
                 GraphLogger.Warn($"DIAG Participant update dump failed for {Call.Id}: {diagEx.Message}");
             }
 
+            // Sotto: extract the inbound PSTN E.164 from a `phone` identity
+            // in AdditionalData when present. Only true external PSTN calls
+            // surface this — calls from numbers that Microsoft has resolved
+            // to a Teams User identity (e.g., a cell number associated with
+            // the recorded user's AAD account) won't have a phone identity
+            // in the roster. Empirically verified 2026-04-28 against a
+            // TextNow number that returned phone.id="+12267025914".
+            SottoTryUpdateFromPhoneIdentity(args.AddedResources);
+
             UpdateParticipants(args.AddedResources);
             UpdateParticipants(args.RemovedResources, false);
+        }
+
+        /// <summary>
+        /// Walks newly-added participants for a `phone` identity in
+        /// AdditionalData. First non-empty E.164 wins and is written to the
+        /// session's FromNumber + FromDisplay; FromUpn is cleared because the
+        /// PSTN caller is not a Teams user. Idempotent — once FromNumber is
+        /// set, subsequent participant events are no-ops.
+        /// </summary>
+        private void SottoTryUpdateFromPhoneIdentity(ICollection<IParticipant> added)
+        {
+            if (_session == null) return;
+            if (!string.IsNullOrEmpty(_session.FromNumber)) return;
+            if (added == null) return;
+
+            foreach (var p in added)
+            {
+                try
+                {
+                    var identity = p?.Resource?.Info?.Identity;
+                    if (identity?.AdditionalData == null) continue;
+
+                    if (!identity.AdditionalData.TryGetValue("phone", out var phoneObj)) continue;
+                    if (phoneObj is not System.Text.Json.JsonElement phoneEl) continue;
+                    if (phoneEl.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+
+                    var num = phoneEl.TryGetProperty("id", out var idEl)
+                        ? idEl.GetString() ?? string.Empty
+                        : string.Empty;
+                    var dn = phoneEl.TryGetProperty("displayName", out var dnEl)
+                        ? dnEl.GetString() ?? string.Empty
+                        : string.Empty;
+                    if (string.IsNullOrEmpty(num)) continue;
+
+                    _session = _session with
+                    {
+                        FromNumber = num,
+                        FromDisplay = dn,
+                        FromUpn = string.Empty,
+                    };
+                    GraphLogger.Info($"Sotto: phone caller extracted from participant — number={num} cnam=\"{dn}\" call={Call.Id}");
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    GraphLogger.Warn($"SottoTryUpdateFromPhoneIdentity: failed on a participant — {ex.Message}");
+                }
+            }
         }
 
         private static bool CheckParticipantIsUsable(IParticipant p)
