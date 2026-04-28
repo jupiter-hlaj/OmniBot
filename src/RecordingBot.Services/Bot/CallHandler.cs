@@ -547,30 +547,38 @@ namespace RecordingBot.Services.Bot
                     if (identity?.AdditionalData == null) continue;
 
                     if (!identity.AdditionalData.TryGetValue("phone", out var phoneObj)) continue;
+                    if (phoneObj == null) continue;
 
-                    // The Microsoft.Graph SDK can present AdditionalData
-                    // values as either the strongly-typed Identity class
-                    // (matches the same-file CheckParticipantIsUsable pattern,
-                    // which uses `is Identity`), or as a System.Text.Json
-                    // JsonElement when the deserializer falls back. Handle
-                    // both — Identity is the canonical case for compliance
-                    // recording bot calls.
+                    // Microsoft.Graph SDK's AdditionalData runtime type for
+                    // sub-identities varies across SDK versions: strongly-typed
+                    // Identity (older), JsonElement (some configurations), or
+                    // a Kiota UntypedNode wrapper (newer Kiota-based SDKs).
+                    // Rather than guess the runtime type, take the same path
+                    // the DIAG dump empirically uses: System.Text.Json.Serialize
+                    // works on any of these, and we know it produces the
+                    // expected {id, displayName} shape because the DIAG output
+                    // shows it. Round-trip through JSON to extract.
                     string num = string.Empty;
                     string dn = string.Empty;
-                    if (phoneObj is Microsoft.Graph.Models.Identity phoneIdentity)
+                    try
                     {
-                        num = phoneIdentity.Id ?? string.Empty;
-                        dn = phoneIdentity.DisplayName ?? string.Empty;
+                        var phoneJson = System.Text.Json.JsonSerializer.Serialize(phoneObj);
+                        using var doc = System.Text.Json.JsonDocument.Parse(phoneJson);
+                        var phoneEl = doc.RootElement;
+                        if (phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                        {
+                            num = phoneEl.TryGetProperty("id", out var idEl)
+                                ? idEl.GetString() ?? string.Empty
+                                : string.Empty;
+                            dn = phoneEl.TryGetProperty("displayName", out var dnEl)
+                                ? dnEl.GetString() ?? string.Empty
+                                : string.Empty;
+                        }
                     }
-                    else if (phoneObj is System.Text.Json.JsonElement phoneEl &&
-                             phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    catch (Exception parseEx)
                     {
-                        num = phoneEl.TryGetProperty("id", out var idEl)
-                            ? idEl.GetString() ?? string.Empty
-                            : string.Empty;
-                        dn = phoneEl.TryGetProperty("displayName", out var dnEl)
-                            ? dnEl.GetString() ?? string.Empty
-                            : string.Empty;
+                        GraphLogger.Warn($"SottoTry: phone JSON round-trip failed for type={phoneObj.GetType().FullName} — {parseEx.Message}");
+                        continue;
                     }
                     if (string.IsNullOrEmpty(num)) continue;
 
