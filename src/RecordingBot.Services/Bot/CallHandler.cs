@@ -547,15 +547,31 @@ namespace RecordingBot.Services.Bot
                     if (identity?.AdditionalData == null) continue;
 
                     if (!identity.AdditionalData.TryGetValue("phone", out var phoneObj)) continue;
-                    if (phoneObj is not System.Text.Json.JsonElement phoneEl) continue;
-                    if (phoneEl.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
 
-                    var num = phoneEl.TryGetProperty("id", out var idEl)
-                        ? idEl.GetString() ?? string.Empty
-                        : string.Empty;
-                    var dn = phoneEl.TryGetProperty("displayName", out var dnEl)
-                        ? dnEl.GetString() ?? string.Empty
-                        : string.Empty;
+                    // The Microsoft.Graph SDK can present AdditionalData
+                    // values as either the strongly-typed Identity class
+                    // (matches the same-file CheckParticipantIsUsable pattern,
+                    // which uses `is Identity`), or as a System.Text.Json
+                    // JsonElement when the deserializer falls back. Handle
+                    // both — Identity is the canonical case for compliance
+                    // recording bot calls.
+                    string num = string.Empty;
+                    string dn = string.Empty;
+                    if (phoneObj is Microsoft.Graph.Models.Identity phoneIdentity)
+                    {
+                        num = phoneIdentity.Id ?? string.Empty;
+                        dn = phoneIdentity.DisplayName ?? string.Empty;
+                    }
+                    else if (phoneObj is System.Text.Json.JsonElement phoneEl &&
+                             phoneEl.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        num = phoneEl.TryGetProperty("id", out var idEl)
+                            ? idEl.GetString() ?? string.Empty
+                            : string.Empty;
+                        dn = phoneEl.TryGetProperty("displayName", out var dnEl)
+                            ? dnEl.GetString() ?? string.Empty
+                            : string.Empty;
+                    }
                     if (string.IsNullOrEmpty(num)) continue;
 
                     _session = _session with
