@@ -56,6 +56,28 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Pre-check — AKS cluster must be running
+        run: |
+          set -euo pipefail
+          # Fail-fast pre-check: cluster being stopped is a human-actionable
+          # state (someone has to start it), not a transient infrastructure
+          # blip that self-heals. Polling for minutes just delays the
+          # actionable signal. Query powerState once; if not Running, exit
+          # immediately with a clear message naming the cluster, current
+          # state, and what to do about it.
+          state=$(az aks show \
+            --resource-group "${RESOURCE_GROUP}" \
+            --name "${CLUSTER_NAME}" \
+            --query 'powerState.code' \
+            --output tsv)
+          echo "Cluster ${CLUSTER_NAME} powerState=${state}"
+          if [ "$state" != "Running" ]; then
+            echo "::error title=AKS cluster not running::Cluster '${CLUSTER_NAME}' is in PowerState=${state}, not Running."
+            echo "::error::Start it: az aks start --name ${CLUSTER_NAME} --resource-group ${RESOURCE_GROUP}"
+            echo "::error::Then re-run this workflow (or push another commit)."
+            exit 1
+          fi
+
       - name: Roll image via az aks command invoke
         run: |
           set -euo pipefail
