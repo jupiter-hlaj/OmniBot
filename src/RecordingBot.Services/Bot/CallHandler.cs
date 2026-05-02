@@ -213,16 +213,32 @@ namespace RecordingBot.Services.Bot
                 }
 
                 var tenantId = await _dynamo.ResolveTenantIdAsync(msTenantId).ConfigureAwait(false) ?? string.Empty;
-                var agentId = string.IsNullOrEmpty(tenantId) ? null
-                    : await _dynamo.ResolveAgentIdAsync(msTenantId, observedId).ConfigureAwait(false);
 
-                // Extract the OTHER party's identity. For compliance recording
-                // the bot's call.Source is typically the recorded user themselves
-                // (the user being observed), so we look at Targets first and
-                // skip any identity matching observedId. Returns:
+                // observedParticipantId is a per-call participant ID — a fresh
+                // GUID minted for each call, NOT the user's directory objectId.
+                // The agents table's ms-user-index GSI is keyed on the
+                // directory objectId (ms_user_id), so passing observedId as
+                // the lookup key always returned null. For compliance recording
+                // bot calls, Source.Identity.User.Id IS the recorded user's
+                // directory objectId — this is the documented Microsoft Graph
+                // contract for observed participants on a compliance bot leg
+                // (see docs/teams-caller-id.md and Microsoft Graph issue #212).
+                var recordedUserId = call.Resource?.Source?.Identity?.User?.Id ?? string.Empty;
+
+                var agentId = (string.IsNullOrEmpty(tenantId) || string.IsNullOrEmpty(recordedUserId)) ? null
+                    : await _dynamo.ResolveAgentIdAsync(msTenantId, recordedUserId).ConfigureAwait(false);
+
+                // Extract the OTHER party's identity. The skip-comparison must
+                // use the directory objectId (recordedUserId) — comparing
+                // observedParticipantId against User.Id values silently failed
+                // to skip the recorded user, occasionally returning their own
+                // identity as the "from" party (this was masked on PSTN calls
+                // by SottoTryUpdateFromPhoneIdentity overwriting it later, but
+                // would surface on Teams-meeting calls without a phone leg).
+                // Returns:
                 //   PSTN identities → fromNumber populated (E.164)
                 //   Teams users     → fromDisplay + fromUpn populated
-                var (fromNumber, fromDisplay, fromUpn) = ExtractFromIdentity(call, observedId);
+                var (fromNumber, fromDisplay, fromUpn) = ExtractFromIdentity(call, recordedUserId);
 
                 _session = new CallSession
                 {
@@ -238,7 +254,7 @@ namespace RecordingBot.Services.Bot
                     StartedAt = DateTime.UtcNow,
                 };
 
-                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} from_number=\"{fromNumber}\" from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
+                GraphLogger.Info($"Sotto session initialized: call_id={_session.CallId} tenant_id={tenantId} agent_id={agentId ?? "<none>"} ms_tenant={msTenantId} recorded_user_id={recordedUserId} from_number=\"{fromNumber}\" from_display=\"{fromDisplay}\" from_upn=\"{fromUpn}\"");
 
                 // Race-condition cover: participants that arrived via
                 // OnUpdated while init was awaiting DynamoDB lookups (cert
