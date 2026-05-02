@@ -98,7 +98,9 @@ namespace RecordingBot.Tests.Sotto
             Assert.That(evt.RecordingUrl, Is.Empty);
             Assert.That(evt.RecordingFormat, Is.Empty);
             Assert.That(evt.DurationSec, Is.EqualTo(0));
-            Assert.That(evt.EndedAt, Is.Empty);
+            // EndedAt MUST be null (not empty string) — Pydantic Optional[datetime]
+            // rejects "" but accepts null. See SqsCallEvent.cs commentary.
+            Assert.That(evt.EndedAt, Is.Null);
         }
 
         [Test]
@@ -159,8 +161,10 @@ namespace RecordingBot.Tests.Sotto
             Assert.That(evt.DurationSec, Is.EqualTo(0));
             Assert.That(evt.RecordingUrl, Is.Empty);
             Assert.That(evt.RecordingFormat, Is.Empty);
-            Assert.That(evt.StartedAt, Is.Empty);
-            Assert.That(evt.EndedAt, Is.Empty);
+            // StartedAt + EndedAt MUST be null (not empty strings) for the
+            // Python consumer's Pydantic Optional[datetime] to accept them.
+            Assert.That(evt.StartedAt, Is.Null);
+            Assert.That(evt.EndedAt, Is.Null);
         }
 
         // ── JSON serialization (cross-language contract with Python) ────
@@ -214,6 +218,36 @@ namespace RecordingBot.Tests.Sotto
                 Assert.That(json, Does.Not.Contain("\"StartedAt\""));
                 Assert.That(json, Does.Not.Contain("\"RecordingAlreadyUploaded\""));
             }
+        }
+
+        [Test]
+        public void Serialize_CallerIdentified_StartedAtAndEndedAtAreJsonNullNotEmptyString()
+        {
+            // Regression guard: the first end-to-end C-5b test failed because
+            // these fields serialized as "" (empty string), which Pydantic's
+            // Optional[datetime] rejects with "Input should be a valid
+            // datetime or date" — the SQS message dead-lettered after 3
+            // retries. Must serialize as JSON null.
+            var evt = SqsCallEvent.FromSessionCallerIdentified(MakeSession());
+            var json = JsonSerializer.Serialize(evt, SqsCallEvent.SerializerOptions);
+
+            Assert.That(json, Does.Contain("\"started_at\":null"));
+            Assert.That(json, Does.Contain("\"ended_at\":null"));
+            Assert.That(json, Does.Not.Contain("\"started_at\":\"\""));
+            Assert.That(json, Does.Not.Contain("\"ended_at\":\"\""));
+        }
+
+        [Test]
+        public void Serialize_CallStarted_EndedAtIsJsonNullStartedAtIsIsoString()
+        {
+            // call_started event: StartedAt populated (call has started),
+            // EndedAt null (call hasn't ended).
+            var evt = SqsCallEvent.FromSessionStarted(MakeSession());
+            var json = JsonSerializer.Serialize(evt, SqsCallEvent.SerializerOptions);
+
+            Assert.That(json, Does.Contain("\"ended_at\":null"));
+            Assert.That(json, Does.Not.Contain("\"ended_at\":\"\""));
+            Assert.That(json, Does.Match("\"started_at\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T"));
         }
 
         [Test]

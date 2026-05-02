@@ -26,8 +26,16 @@ public sealed class SqsCallEvent
     public int DurationSec { get; init; }
     public string RecordingUrl { get; init; } = string.Empty;
     public string RecordingFormat { get; init; } = "wav";
-    public string StartedAt { get; init; } = string.Empty;
-    public string EndedAt { get; init; } = string.Empty;
+
+    // StartedAt / EndedAt must be nullable: the Python consumer's
+    // NormalizedCallEvent typed these as Optional[datetime], which accepts
+    // a valid ISO-8601 string or JSON null. An empty string ("") is rejected
+    // by Pydantic with "Input should be a valid datetime or date" and the
+    // SQS message dead-letters after 3 retries. Use null (serializes as
+    // JSON null) when the field doesn't apply to the event type.
+    public string? StartedAt { get; init; }
+    public string? EndedAt { get; init; }
+
     public Dictionary<string, string> RawPayload { get; init; } = new();
 
     public static JsonSerializerOptions SerializerOptions { get; } = new()
@@ -62,7 +70,7 @@ public sealed class SqsCallEvent
         RecordingUrl = string.Empty,
         RecordingFormat = "wav",
         StartedAt = session.StartedAt.ToString("O"),
-        EndedAt = session.EndedAt?.ToString("O") ?? string.Empty,
+        EndedAt = session.EndedAt?.ToString("O"),
         RawPayload = new()
     };
 
@@ -94,7 +102,7 @@ public sealed class SqsCallEvent
         RecordingUrl = string.Empty,
         RecordingFormat = string.Empty,
         StartedAt = session.StartedAt.ToString("O"),
-        EndedAt = string.Empty,
+        EndedAt = null,
         RawPayload = new()
     };
 
@@ -125,8 +133,8 @@ public sealed class SqsCallEvent
         DurationSec = 0,
         RecordingUrl = string.Empty,
         RecordingFormat = string.Empty,
-        StartedAt = string.Empty,
-        EndedAt = string.Empty,
+        StartedAt = null,
+        EndedAt = null,
         RawPayload = new()
     };
 }
