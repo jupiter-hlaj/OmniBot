@@ -1,4 +1,8 @@
+using Amazon.DynamoDBv2;
+using Amazon.S3;
+using Amazon.SQS;
 using ICSharpCode.SharpZipLib.Zip;
+using Microsoft.Extensions.Options;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Calls.Media;
 using Microsoft.Graph.Communications.Common;
@@ -17,6 +21,9 @@ using RecordingBot.Services.Bot;
 using RecordingBot.Services.Contract;
 using RecordingBot.Services.ServiceSetup;
 using RecordingBot.Tests.Helper;
+using SottoTeamsBot.Audio;
+using SottoTeamsBot.Aws;
+using SottoTeamsBot.Bot;
 using System;
 using System.IO;
 using System.Linq;
@@ -36,6 +43,15 @@ namespace RecordingBot.Tests.BotTests
         private ILocalMediaSession _mediaSession;
 
         private IEventPublisher _eventPublisher;
+
+        // Sotto integration dependencies — required by the CallHandler ctor
+        // since the Sotto business logic was grafted in. Construct from
+        // mocked low-level interfaces; the participant-deserialization test
+        // in this fixture doesn't exercise S3/SQS/Dynamo paths so the mocks
+        // are no-op fillers, not behaviour-defining.
+        private DynamoResolver _dynamo;
+        private AwsUploader _uploader;
+        private AudioEncoder _encoder;
 
         [OneTimeSetUp]
         public void CallHandlerTestOneTimeSetup()
@@ -74,6 +90,12 @@ namespace RecordingBot.Tests.BotTests
                     }
                 }
             };
+
+            var botOptions = Options.Create(new BotOptions());
+            var audioFormatOptions = Options.Create(new AudioFormatOptions());
+            _dynamo = new DynamoResolver(Substitute.For<IAmazonDynamoDB>(), botOptions);
+            _uploader = new AwsUploader(Substitute.For<IAmazonS3>(), Substitute.For<IAmazonSQS>(), botOptions);
+            _encoder = new AudioEncoder(audioFormatOptions);
         }
 
         [Test]
@@ -91,7 +113,7 @@ namespace RecordingBot.Tests.BotTests
             jsonSerializerOptions.Converters.Add(new TypeMappingConverter<IParticipant, SerilizableParticipant>());
 
             var participantCount = 0;
-            var handler = new CallHandler(_call, _settings, _eventPublisher);
+            var handler = new CallHandler(_call, _settings, _eventPublisher, _dynamo, _uploader, _encoder);
 
             using (var archive = new ZipFile(Path.Combine("TestData", "participants.zip")))
             {

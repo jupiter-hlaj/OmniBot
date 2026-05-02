@@ -247,6 +247,20 @@ namespace RecordingBot.Services.Bot
                 // that _session is set, sweep the current roster for any
                 // phone identity we missed during the async init window.
                 SottoTryUpdateFromPhoneIdentity(Call.Participants?.ToList());
+
+                // C-5b: fire call_started so Cockpit can render the incoming-
+                // call UI immediately. Caller ID may or may not be populated
+                // yet — if the phone identity arrived during init, the sweep
+                // above already wrote it; otherwise call_caller_identified
+                // will follow when SottoTryUpdateFromPhoneIdentity gets it
+                // from a later OnUpdated event. Fire-and-forget; SQS publish
+                // failures are logged but must not crash session init.
+                _ = _uploader.PublishCallStartedAsync(_session)
+                    .ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
+                            GraphLogger.Error(t.Exception, $"PublishCallStartedAsync failed for call {Call.Id}");
+                    }, TaskScheduler.Default);
             }
             catch (Exception ex)
             {
@@ -408,7 +422,7 @@ namespace RecordingBot.Services.Bot
                 session.RecordingS3Key = key;
 
                 await _uploader.UploadAsync(audio, key, _encoder.Options.ContentType).ConfigureAwait(false);
-                await _uploader.PublishSqsMessageAsync(session).ConfigureAwait(false);
+                await _uploader.PublishCallEndedAsync(session).ConfigureAwait(false);
 
                 GraphLogger.Info($"Sotto call finalized: call_id={session.CallId} tenant_id={session.TenantId} s3_key={key} bytes={audio.Length} duration_sec={session.DurationSec} format={_encoder.Options.Codec}/{_encoder.Options.SampleRate}Hz/{_encoder.Options.Channels}ch/{_encoder.Options.BitrateKbps}kbps");
             }
@@ -598,6 +612,18 @@ namespace RecordingBot.Services.Bot
                         FromUpn = string.Empty,
                     };
                     GraphLogger.Info($"Sotto: phone caller extracted from participant — number={num} cnam=\"{dn}\" call={Call.Id}");
+
+                    // C-5b: fire call_caller_identified so Cockpit can update
+                    // the existing call_started session display with the now-
+                    // known caller ID. Fire-and-forget; this is a sync method
+                    // (NUpdated event handler), can't await. Same pattern as
+                    // the call_started publish in SottoInitializeSessionAsync.
+                    _ = _uploader.PublishCallerIdentifiedAsync(_session)
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsFaulted)
+                                GraphLogger.Error(t.Exception, $"PublishCallerIdentifiedAsync failed for call {Call.Id}");
+                        }, TaskScheduler.Default);
                     return;
                 }
                 catch (Exception ex)

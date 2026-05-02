@@ -83,9 +83,11 @@ public sealed class AwsUploader
         }
     }
 
-    public async Task PublishSqsMessageAsync(CallSession session)
+    // General publish — serializes the event with the canonical snake_case
+    // options and pushes to the configured queue. Use the per-event-type
+    // wrappers below so the call sites are explicit about what they're firing.
+    public async Task PublishAsync(SqsCallEvent evt)
     {
-        var evt = SqsCallEvent.FromSession(session);
         var json = JsonSerializer.Serialize(evt, SqsCallEvent.SerializerOptions);
         await _sqs.SendMessageAsync(new SendMessageRequest
         {
@@ -93,6 +95,15 @@ public sealed class AwsUploader
             MessageBody = json
         });
     }
+
+    public Task PublishCallEndedAsync(CallSession session) =>
+        PublishAsync(SqsCallEvent.FromSession(session));
+
+    public Task PublishCallStartedAsync(CallSession session) =>
+        PublishAsync(SqsCallEvent.FromSessionStarted(session));
+
+    public Task PublishCallerIdentifiedAsync(CallSession session) =>
+        PublishAsync(SqsCallEvent.FromSessionCallerIdentified(session));
 
     private static async Task<int> ReadExactAsync(Stream stream, byte[] buffer, int count)
     {
