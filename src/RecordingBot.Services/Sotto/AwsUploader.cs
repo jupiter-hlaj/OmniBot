@@ -105,6 +105,9 @@ public sealed class AwsUploader
     public Task PublishCallerIdentifiedAsync(CallSession session) =>
         PublishAsync(SqsCallEvent.FromSessionCallerIdentified(session));
 
+    public Task PublishCallDeclinedAsync(CallSession session) =>
+        PublishAsync(SqsCallEvent.FromSessionDeclined(session));
+
     private static async Task<int> ReadExactAsync(Stream stream, byte[] buffer, int count)
     {
         int total = 0;

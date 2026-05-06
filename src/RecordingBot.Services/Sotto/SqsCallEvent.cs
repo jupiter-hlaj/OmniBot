@@ -106,6 +106,40 @@ public sealed class SqsCallEvent
         RawPayload = new()
     };
 
+    // call_declined — fired in CallHandler.CallOnUpdated when the call goes
+    // Terminated without ever reaching Established (the agent declined the
+    // ringing call, or it was missed). The Engine A call_started already
+    // showed a Cockpit ringing card; this lets the backend push a
+    // call_declined WS event to the agent so the card clears immediately
+    // instead of sitting through the 10-min absolute stale window.
+    // No recording, no audio — the bot never established its media session.
+    public static SqsCallEvent FromSessionDeclined(CallSession session) => new()
+    {
+        Provider = "teams",
+        EventType = "call_declined",
+        TenantId = session.TenantId,
+        AgentId = session.AgentId,
+        CallId = session.CallId,
+        MsCallId = session.MsCallId,
+        RecordingAlreadyUploaded = false,
+        RecordingS3Key = string.Empty,
+        AgentChannel = 0,
+        Partial = false,
+        PartialReason = null,
+        ProviderCallId = session.MsCallId,
+        Direction = session.Direction,
+        FromNumber = session.FromNumber,
+        FromDisplay = session.FromDisplay,
+        FromUpn = session.FromUpn,
+        ToIdentifier = session.ToIdentifier,
+        DurationSec = 0,
+        RecordingUrl = string.Empty,
+        RecordingFormat = string.Empty,
+        StartedAt = session.StartedAt.ToString("O"),
+        EndedAt = DateTime.UtcNow.ToString("O"),
+        RawPayload = new()
+    };
+
     // call_caller_identified — fired inside SottoTryUpdateFromPhoneIdentity
     // immediately after _session is updated with the extracted phone identity.
     // Says "we identified the caller as X." Carries identification info only;

@@ -154,6 +154,22 @@ namespace RecordingBot.Services.Bot
                 OnRecordingStatusFlip(sender);
             }
 
+            if ((e.OldResource.State != CallState.Established) && (e.NewResource.State == CallState.Terminated) && _session != null)
+            {
+                // Decline / missed: terminated without ever reaching Established.
+                // The agent declined the ringing call (or it was missed) before
+                // the bot established its media session. SottoFinalizeAsync is
+                // for end-of-recording with audio - no audio here. Fire
+                // call_declined so the Cockpit can clear the ringing card the
+                // Engine A call_started showed at Establishing time.
+                _ = _uploader.PublishCallDeclinedAsync(_session)
+                    .ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
+                            GraphLogger.Error(t.Exception, $"PublishCallDeclinedAsync failed for call {Call.Id}");
+                    }, TaskScheduler.Default);
+            }
+
             if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))
             {
                 if (BotMediaStream != null)
