@@ -136,6 +136,18 @@ namespace RecordingBot.Services.Bot
             // Event - Recording update e.g established/updated/start/ended
             _eventPublisher.Publish($"Call{e.NewResource.State}", $"Call.ID {Call.Id} Sender.Id {sender.Id} status updated to {e.NewResource.State} - {e.NewResource.ResultInfo?.Message}");
 
+            if (e.OldResource.State != e.NewResource.State && e.NewResource.State == CallState.Establishing)
+            {
+                // DIAG (temporary): verify what's available on the Call resource at
+                // Establishing state, before the bot has answered. If ms_tenant and
+                // recorded_user_id are populated here, we can move the Sotto session
+                // init from Established to Establishing to fire a true ring popup.
+                // Remove this block once the question is answered either way.
+                var msTenantId = sender.Resource?.TenantId ?? "<null>";
+                var recordedUserId = sender.Resource?.Source?.Identity?.User?.Id ?? "<null>";
+                GraphLogger.Info($"DIAG Establishing call={Call.Id} ms_tenant={msTenantId} recorded_user_id={recordedUserId}");
+            }
+
             if (e.OldResource.State != e.NewResource.State && e.NewResource.State == CallState.Established && !_isDisposed)
             {
                 // Call is established. We should start receiving Audio, we can inform clients that we have started recording.
