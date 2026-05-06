@@ -154,22 +154,6 @@ namespace RecordingBot.Services.Bot
                 OnRecordingStatusFlip(sender);
             }
 
-            if ((e.OldResource.State != CallState.Established) && (e.NewResource.State == CallState.Terminated) && _session != null)
-            {
-                // Decline / missed: terminated without ever reaching Established.
-                // The agent declined the ringing call (or it was missed) before
-                // the bot established its media session. SottoFinalizeAsync is
-                // for end-of-recording with audio - no audio here. Fire
-                // call_declined so the Cockpit can clear the ringing card the
-                // Engine A call_started showed at Establishing time.
-                _ = _uploader.PublishCallDeclinedAsync(_session)
-                    .ContinueWith(t =>
-                    {
-                        if (t.IsFaulted)
-                            GraphLogger.Error(t.Exception, $"PublishCallDeclinedAsync failed for call {Call.Id}");
-                    }, TaskScheduler.Default);
-            }
-
             if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))
             {
                 if (BotMediaStream != null)
@@ -446,10 +430,18 @@ namespace RecordingBot.Services.Bot
 
                 using var audio = _encoder.Encode(BotMediaStream.SottoAudioBuffer);
 
-                // Encoded stream is empty when no audio was captured.
+                // Encoded stream is empty when no audio was captured. The
+                // realistic path is "agent declined or missed the call": the
+                // bot auto-answered (so we reached Established and triggered
+                // the existing Established->Terminated branch above) but the
+                // agent never picked up so no audio ever flowed. Publish
+                // call_declined so the Cockpit can clear the Engine A ringing
+                // card immediately instead of waiting for the 10-min absolute
+                // stale window.
                 if (audio.Length == 0)
                 {
-                    GraphLogger.Warn($"Sotto call {session.CallId} produced no audio; skipping S3 upload");
+                    GraphLogger.Warn($"Sotto call {session.CallId} produced no audio; treating as declined/missed");
+                    await _uploader.PublishCallDeclinedAsync(session).ConfigureAwait(false);
                     return;
                 }
 
