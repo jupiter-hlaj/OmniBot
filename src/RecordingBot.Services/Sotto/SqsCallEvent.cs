@@ -140,6 +140,40 @@ public sealed class SqsCallEvent
         RawPayload = new()
     };
 
+    // call_answered — fired in CallHandler.CallOnUpdated at the
+    // Establishing → Established transition (the moment the call connects
+    // and audio frames start flowing). Lets the Cockpit flip the live-card
+    // from "Ringing" (amber) to "On Call" (emerald). The Sotto Lambda
+    // consumer (recording_processor._handle_call_answered) also flips the
+    // call row's status from "ringing" to "in_progress" so the call list
+    // reflects an active call.
+    public static SqsCallEvent FromSessionAnswered(CallSession session) => new()
+    {
+        Provider = "teams",
+        EventType = "call_answered",
+        TenantId = session.TenantId,
+        AgentId = session.AgentId,
+        CallId = session.CallId,
+        MsCallId = session.MsCallId,
+        RecordingAlreadyUploaded = false,
+        RecordingS3Key = string.Empty,
+        AgentChannel = 0,
+        Partial = false,
+        PartialReason = null,
+        ProviderCallId = session.MsCallId,
+        Direction = session.Direction,
+        FromNumber = session.FromNumber,
+        FromDisplay = session.FromDisplay,
+        FromUpn = session.FromUpn,
+        ToIdentifier = session.ToIdentifier,
+        DurationSec = 0,
+        RecordingUrl = string.Empty,
+        RecordingFormat = string.Empty,
+        StartedAt = null,
+        EndedAt = null,
+        RawPayload = new()
+    };
+
     // call_caller_identified — fired inside SottoTryUpdateFromPhoneIdentity
     // immediately after _session is updated with the extracted phone identity.
     // Says "we identified the caller as X." Carries identification info only;

@@ -163,6 +163,22 @@ namespace RecordingBot.Services.Bot
             {
                 // Call is established. We should start receiving Audio, we can inform clients that we have started recording.
                 OnRecordingStatusFlip(sender);
+
+                // Sotto integration: fire call_answered so the Cockpit can flip
+                // the live-card from "Ringing" (amber) to "On Call" (emerald).
+                // _session is set in SottoInitializeSessionAsync at Establishing,
+                // so it is always populated by the time we reach Established.
+                // Fire-and-forget; SQS publish failures are logged but must
+                // not crash the established-call flow.
+                if (_session != null)
+                {
+                    _ = _uploader.PublishCallAnsweredAsync(_session)
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsFaulted)
+                                GraphLogger.Error(t.Exception, $"PublishCallAnsweredAsync failed for call {Call.Id}");
+                        }, TaskScheduler.Default);
+                }
             }
 
             if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))

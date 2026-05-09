@@ -102,6 +102,9 @@ public sealed class AwsUploader
     public Task PublishCallStartedAsync(CallSession session) =>
         PublishAsync(SqsCallEvent.FromSessionStarted(session));
 
+    public Task PublishCallAnsweredAsync(CallSession session) =>
+        PublishAsync(SqsCallEvent.FromSessionAnswered(session));
+
     public Task PublishCallerIdentifiedAsync(CallSession session) =>
         PublishAsync(SqsCallEvent.FromSessionCallerIdentified(session));
 
