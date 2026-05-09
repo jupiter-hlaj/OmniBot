@@ -297,18 +297,25 @@ namespace RecordingBot.Services.Bot
             // before all frames are consumed.
             audioMediaBuffers.AddRange(buffers);
 
-            // Append the same PCM samples to the recording buffer so the
-            // disclosure shows up in the audit-trail MP3 and the transcript.
-            // Microsoft does not loop the bot's outbound back via
-            // AudioMediaReceived, so without this the recording would only
-            // have participant audio. We use the most recent inbound
-            // timestamp as the base so AlignAndInterleave places the
-            // disclosure at the correct point on the recording timeline.
-            // Append to both channels so it's audible in the stereo mix
-            // regardless of which speaker channel ends up active.
-            // AlignAndInterleave was changed in this commit to mix-with-clamp,
-            // so this overlay does not destroy participant audio at the
-            // same timestamps.
+            // Append the disclosure PCM to the recording buffer so it shows
+            // up in the audit-trail MP3 and the transcript. Microsoft does
+            // not loop the bot's outbound back via AudioMediaReceived, so
+            // without this the recording would only have participant audio.
+            // We use the most recent inbound timestamp as the base so
+            // AlignAndInterleave places the disclosure at the correct point
+            // on the recording timeline.
+            //
+            // Append to ch_0 ONLY (the agent's channel). The earlier
+            // implementation wrote the same samples to both ch_0 and ch_1;
+            // because the recording is transcribed with AWS
+            // ChannelIdentification (per-channel ASR), each channel was
+            // transcribed independently and the disclosure text appeared
+            // twice in the transcript -- once tagged ch_0, once ch_1. The
+            // disclosure remains audible in normal stereo playback (panned
+            // left), and tagging it as ch_0 in the transcript matches the
+            // semantic: the agent triggered it. AlignAndInterleave's
+            // sum-with-clamp still ensures the overlay does not destroy
+            // participant audio at the same timestamps.
             var recordingBaseTick = _lastInboundTimestamp;
             if (recordingBaseTick > 0)
             {
@@ -319,18 +326,13 @@ namespace RecordingBot.Services.Bot
                 var frameCount = pcmLen / FrameBytesLocal;
                 for (int i = 0; i < frameCount; i++)
                 {
-                    var samples0 = new short[FrameBytesLocal / 2];
-                    System.Buffer.BlockCopy(wav, WavHeaderBytesLocal + i * FrameBytesLocal, samples0, 0, FrameBytesLocal);
-                    // Separate copy for channel 1; AudioBuffer holds the
-                    // array reference and we must not share it across channels.
-                    var samples1 = new short[samples0.Length];
-                    Array.Copy(samples0, samples1, samples0.Length);
+                    var samples = new short[FrameBytesLocal / 2];
+                    System.Buffer.BlockCopy(wav, WavHeaderBytesLocal + i * FrameBytesLocal, samples, 0, FrameBytesLocal);
                     var ts = recordingBaseTick + i * FrameTicksLocal;
-                    SottoAudioBuffer.AppendSamples(0, samples0, ts);
-                    SottoAudioBuffer.AppendSamples(1, samples1, ts);
+                    SottoAudioBuffer.AppendSamples(0, samples, ts);
                 }
                 GraphLogger.Info(
-                    $"Sotto: appended {frameCount} disclosure frames to recording (base_tick={recordingBaseTick}) for call {_callId}");
+                    $"Sotto: appended {frameCount} disclosure frames to recording ch_0 (base_tick={recordingBaseTick}) for call {_callId}");
             }
             else
             {
