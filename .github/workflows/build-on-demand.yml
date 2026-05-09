@@ -80,6 +80,14 @@ jobs:
           # push to ghcr.io once on the runner, then helm upgrade pulls
           # the chart directly from ghcr.io inside the cluster. No
           # binary uploads, no tar corruption.
+          # Chart.yaml declares an ingress-nginx dependency (condition:
+          # ingress-nginx.enabled, which is false in values.yaml so it
+          # never installs). helm package still requires the dependency
+          # tarball to be present in charts/ regardless of the condition,
+          # so resolve dependencies before packaging. helm dep update
+          # fetches the dependency repo and drops the tarball into
+          # charts/.
+          helm dependency update deploy/teams-recording-bot
           helm package deploy/teams-recording-bot
           echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
           helm push "teams-recording-bot-$CHART_VERSION.tgz" "oci://ghcr.io/$OWNER"
