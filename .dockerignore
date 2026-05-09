@@ -58,6 +58,10 @@ launchSettings.json
 
 **/.vs/*
 **/*.wav
+# Sotto disclosure playback (Phase 1 PoC): the test WAV must be in the
+# build context so build/Dockerfile can COPY it into /bot. Without this
+# negation the catch-all **/*.wav rule above hides it from docker build.
+!build/disclosure-test.wav
 
 **/.env-template
 **/.env
