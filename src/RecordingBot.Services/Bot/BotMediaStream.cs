@@ -34,6 +34,20 @@ namespace RecordingBot.Services.Bot
         /// </summary>
         public AudioBuffer SottoAudioBuffer { get; } = new();
 
+        /// <summary>
+        /// Sotto integration: fires once per call, the first time a non-silent
+        /// participant audio buffer lands. CallState.Established only signals
+        /// that the bot's media plumbing is ready (auto-answer happens
+        /// sub-second after invite); the agent picking up is what actually
+        /// produces audio frames. CallHandler subscribes to this and emits
+        /// the call_answered SQS event so the Cockpit's live-card flips from
+        /// "Ringing" (amber) to "On Call" (emerald) at the real pickup moment.
+        /// One-shot, guarded by Interlocked.CompareExchange so concurrent
+        /// frame deliveries cannot double-fire.
+        /// </summary>
+        public event EventHandler FirstParticipantAudioReceived;
+        private int _firstAudioFired;
+
         // Maps each unique ActiveSpeakerId to a stereo channel (0 or 1).
         // In compliance recording mode buffer.Data is always silence; real audio
         // arrives in UnmixedAudioBuffers, one entry per active speaker.
@@ -179,6 +193,20 @@ namespace RecordingBot.Services.Bot
                     foreach (var unmixed in e.Buffer.UnmixedAudioBuffers)
                     {
                         if (unmixed.Length <= 0) continue;
+
+                        // First real participant audio = agent (or peer) picked up.
+                        // Fire the one-shot pickup signal exactly once.
+                        if (Interlocked.CompareExchange(ref _firstAudioFired, 1, 0) == 0)
+                        {
+                            try
+                            {
+                                FirstParticipantAudioReceived?.Invoke(this, EventArgs.Empty);
+                            }
+                            catch (Exception subEx)
+                            {
+                                GraphLogger.Error(subEx, $"Sotto: FirstParticipantAudioReceived subscriber threw for call {_callId}");
+                            }
+                        }
 
                         var channel = _speakerChannelMap.GetOrAdd(
                             unmixed.ActiveSpeakerId,

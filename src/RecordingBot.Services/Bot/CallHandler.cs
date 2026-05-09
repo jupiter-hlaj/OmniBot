@@ -56,6 +56,16 @@ namespace RecordingBot.Services.Bot
 
             BotMediaStream = new BotMediaStream(Call.GetLocalMediaSession(), Call.Id, GraphLogger, eventPublisher, _settings);
 
+            // Sotto integration: fire call_answered the moment real participant
+            // audio lands, NOT at CallState.Established. The bot auto-answers
+            // its own leg sub-second after invite, so Established is too early
+            // (it just signals the bot's media plumbing is ready, not that
+            // anyone picked up). First non-silent inbound frame = agent
+            // actually answered. Same signal docs/teams-engine-a.md uses for
+            // the inverse case (empty SottoAudioBuffer at end-of-call =
+            // declined / missed).
+            BotMediaStream.FirstParticipantAudioReceived += OnSottoFirstParticipantAudio;
+
             // Sotto disclosure playback (Phase 1 PoC): register this call in the
             // per-pod registry so SottoAnnounceController can look up the
             // BotMediaStream by Microsoft call id and invoke PlayWavAsync.
@@ -82,6 +92,10 @@ namespace RecordingBot.Services.Bot
             Call.OnUpdated -= CallOnUpdated;
             Call.Participants.OnUpdated -= ParticipantsOnUpdated;
 
+            if (BotMediaStream != null)
+            {
+                BotMediaStream.FirstParticipantAudioReceived -= OnSottoFirstParticipantAudio;
+            }
             BotMediaStream?.Dispose();
 
             // Sotto disclosure playback: drop this call from the per-pod registry
@@ -163,22 +177,11 @@ namespace RecordingBot.Services.Bot
             {
                 // Call is established. We should start receiving Audio, we can inform clients that we have started recording.
                 OnRecordingStatusFlip(sender);
-
-                // Sotto integration: fire call_answered so the Cockpit can flip
-                // the live-card from "Ringing" (amber) to "On Call" (emerald).
-                // _session is set in SottoInitializeSessionAsync at Establishing,
-                // so it is always populated by the time we reach Established.
-                // Fire-and-forget; SQS publish failures are logged but must
-                // not crash the established-call flow.
-                if (_session != null)
-                {
-                    _ = _uploader.PublishCallAnsweredAsync(_session)
-                        .ContinueWith(t =>
-                        {
-                            if (t.IsFaulted)
-                                GraphLogger.Error(t.Exception, $"PublishCallAnsweredAsync failed for call {Call.Id}");
-                        }, TaskScheduler.Default);
-                }
+                // NOTE: call_answered is NOT fired here. Established only means
+                // the bot's media session is plumbed (auto-answer is sub-second
+                // after invite), not that the agent picked up. The call_answered
+                // event is published from OnSottoFirstParticipantAudio, which
+                // fires when real audio first lands in BotMediaStream.
             }
 
             if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))
@@ -202,6 +205,32 @@ namespace RecordingBot.Services.Bot
                 // Sotto integration: build stereo WAV from SottoAudioBuffer, upload to S3, publish SQS.
                 await SottoFinalizeAsync();
             }
+        }
+
+        /// <summary>
+        /// Sotto integration: handler for BotMediaStream.FirstParticipantAudioReceived.
+        /// Fires the call_answered SQS event the moment real audio first lands,
+        /// which is the actual moment the agent (or peer) picked up. _session
+        /// is normally set in SottoInitializeSessionAsync at Establishing —
+        /// well before any audio could arrive — but a slow DynamoDB resolve
+        /// could in theory let the first audio frame land while _session is
+        /// still null. Skip silently in that case; the next frame won't
+        /// re-trigger because the one-shot Interlocked guard in BotMediaStream
+        /// has already flipped.
+        /// </summary>
+        private void OnSottoFirstParticipantAudio(object sender, EventArgs e)
+        {
+            if (_session == null)
+            {
+                GraphLogger.Warn($"Sotto: first audio for call {Call.Id} arrived before _session was set; call_answered will not be published");
+                return;
+            }
+            _ = _uploader.PublishCallAnsweredAsync(_session)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                        GraphLogger.Error(t.Exception, $"PublishCallAnsweredAsync failed for call {Call.Id}");
+                }, TaskScheduler.Default);
         }
 
         /// <summary>
