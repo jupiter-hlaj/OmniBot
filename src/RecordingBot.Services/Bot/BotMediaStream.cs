@@ -41,12 +41,18 @@ namespace RecordingBot.Services.Bot
         private int _nextChannel;
 
         /// <summary>
-        /// Sotto disclosure playback: tracks whether the audio socket is ready to
-        /// accept outbound frames via IAudioSocket.Send. Set true when the SDK raises
-        /// AudioSendStatusChanged with MediaSendStatus.Active, false otherwise. The
-        /// send loop in PlayWavAsync waits on this before sending the first frame.
+        /// Sotto disclosure playback: AudioVideoFramePlayer state. Adapted from
+        /// Microsoft's EchoBot sample (Samples/PublicSamples/EchoBot), we drive
+        /// outbound audio via AudioVideoFramePlayer.EnqueueBuffersAsync rather
+        /// than IAudioSocket.Send directly. The VideoSocket parameter is null
+        /// because our media session has VideoSocketSettings.Inactive and
+        /// EchoBot's audio-only path passes null successfully.
         /// </summary>
-        private volatile bool _canSendAudio;
+        private AudioVideoFramePlayer audioVideoFramePlayer;
+        private AudioVideoFramePlayerSettings audioVideoFramePlayerSettings;
+        private readonly TaskCompletionSource<bool> audioSendStatusActive = new TaskCompletionSource<bool>();
+        private readonly TaskCompletionSource<bool> startVideoPlayerCompleted = new TaskCompletionSource<bool>();
+        private readonly List<AudioMediaBuffer> audioMediaBuffers = new List<AudioMediaBuffer>();
 
         public BotMediaStream(
             ILocalMediaSession mediaSession,
@@ -74,11 +80,18 @@ namespace RecordingBot.Services.Bot
 
             _audioSocket.AudioMediaReceived += OnAudioMediaReceived;
 
-            // Sotto disclosure playback (Phase 1 PoC): subscribe to outbound send
-            // status so PlayWavAsync only calls Send after MediaSendStatus reaches
-            // Active. No-op when StreamDirections is Recvonly (the SDK never raises
-            // Active in that case, and PlayWavAsync's 5-second wait will time out).
+            // Sotto disclosure playback: subscribe to outbound send status. The
+            // AudioVideoFramePlayer is created once status becomes Active (in
+            // StartAudioVideoFramePlayerAsync). Pattern from EchoBot.
             _audioSocket.AudioSendStatusChanged += OnAudioSendStatusChanged;
+
+            _ = StartAudioVideoFramePlayerAsync().ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    GraphLogger.Error(t.Exception, $"Sotto: StartAudioVideoFramePlayerAsync faulted for call {_callId}");
+                }
+            }, TaskScheduler.Default);
         }
 
         public List<IParticipant> GetParticipants()
@@ -112,6 +125,26 @@ namespace RecordingBot.Services.Bot
 
             if (disposing)
             {
+                // Sotto disclosure playback: shut down the AudioVideoFramePlayer
+                // and dispose any buffers that were built. ShutdownAsync is
+                // fire-and-forget because Dispose is sync; the SDK reaps it.
+                var player = audioVideoFramePlayer;
+                if (player != null)
+                {
+                    _ = player.ShutdownAsync().ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
+                        {
+                            GraphLogger.Error(t.Exception, $"Sotto: AudioVideoFramePlayer shutdown failed for call {_callId}");
+                        }
+                    }, TaskScheduler.Default);
+                }
+                foreach (var b in audioMediaBuffers)
+                {
+                    b.Dispose();
+                }
+                audioMediaBuffers.Clear();
+
                 SottoAudioBuffer.Dispose();
             }
         }
@@ -168,38 +201,18 @@ namespace RecordingBot.Services.Bot
 
         /// <summary>
         /// Sotto disclosure playback: outbound send-status callback. The SDK raises
-        /// this once StreamDirections=Sendrecv has negotiated outbound RTP and the
-        /// platform is ready to accept Send() calls. Inactive status is also
-        /// expected at end-of-call or when send is paused; the send loop checks
-        /// this flag before each frame.
-        ///
-        /// Phase 1 diagnostic: when Active fires, fire-and-forget PlayWavAsync
-        /// against the baked-in test WAV. This isolates the SDK and Microsoft
-        /// media platform questions ("does Sendrecv negotiate?", "does Send
-        /// deliver?") with no announce-endpoint plumbing in the way. The
-        /// auto-trigger gets removed in the next push once the diagnostic
-        /// answers those questions.
+        /// MediaSendStatus.Active once StreamDirections=Sendrecv has negotiated
+        /// outbound RTP and the platform is ready. We complete audioSendStatusActive
+        /// so StartAudioVideoFramePlayerAsync (running concurrently from the ctor)
+        /// can proceed to create the AudioVideoFramePlayer and enqueue the
+        /// diagnostic WAV. Pattern from EchoBot.
         /// </summary>
         private void OnAudioSendStatusChanged(object sender, AudioSendStatusChangedEventArgs e)
         {
             GraphLogger.Info($"Sotto: AudioSendStatusChanged for call {_callId}: {e.MediaSendStatus}");
-            _canSendAudio = e.MediaSendStatus == MediaSendStatus.Active;
-
-            if (_canSendAudio)
+            if (e.MediaSendStatus == MediaSendStatus.Active)
             {
-                const string diagnosticWavPath = @"C:\bot\disclosure-test.wav";
-                GraphLogger.Info($"Sotto: diagnostic auto-trigger firing PlayWavAsync for call {_callId}");
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await PlayWavAsync(diagnosticWavPath).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        GraphLogger.Error(ex, $"Sotto: diagnostic PlayWavAsync threw for call {_callId}");
-                    }
-                });
+                audioSendStatusActive.TrySetResult(true);
             }
         }
 
@@ -218,72 +231,130 @@ namespace RecordingBot.Services.Bot
         /// </summary>
         public async Task PlayWavAsync(string wavPath, CancellationToken ct = default)
         {
-            const int FrameBytes = 640;          // 20 ms of PCM 16 kHz mono 16-bit = 320 samples * 2 bytes
-            const long FrameTicks = 200_000;     // 20 ms expressed in 100 ns DateTime ticks
-            const int WavHeaderBytes = 44;       // standard RIFF/WAVE header for our Polly-generated PCM
-
-            // Wait for outbound to become active. If AudioSendStatusChanged(Active)
-            // hasn't fired within 5 seconds, the call is in a state where Send
-            // would be rejected; bail rather than queue forever.
-            var deadline = DateTime.UtcNow.AddSeconds(5);
-            while (!_canSendAudio)
+            // Wait for the AudioVideoFramePlayer to be created. StartAudioVideoFramePlayerAsync
+            // sets startVideoPlayerCompleted in its finally block whether it succeeded or
+            // failed; if it failed, audioVideoFramePlayer remains null and we throw
+            // with that context rather than NRE inside EnqueueBuffersAsync.
+            await startVideoPlayerCompleted.Task.ConfigureAwait(false);
+            if (audioVideoFramePlayer == null)
             {
-                if (DateTime.UtcNow > deadline)
-                {
-                    throw new InvalidOperationException(
-                        $"AudioSendStatus did not reach Active within 5s for call {_callId}");
-                }
-                await Task.Delay(50, ct).ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    $"AudioVideoFramePlayer was not created for call {_callId}; see prior errors");
             }
 
             var wav = await File.ReadAllBytesAsync(wavPath, ct).ConfigureAwait(false);
-            if (wav.Length <= WavHeaderBytes)
+            var startTick = DateTime.Now.Ticks;
+            var buffers = CreateAudioMediaBuffers(wav, startTick);
+            if (buffers.Count == 0)
             {
-                throw new InvalidOperationException(
-                    $"WAV file too small ({wav.Length} bytes), expected RIFF header + PCM data: {wavPath}");
+                GraphLogger.Warn($"Sotto: PlayWavAsync produced 0 frames from {wavPath} for call {_callId}");
+                return;
             }
 
-            var pcmBytes = wav.Length - WavHeaderBytes;
-            var frameCount = pcmBytes / FrameBytes;
-            GraphLogger.Info(
-                $"Sotto: PlayWavAsync starting -- file={wavPath} pcm_bytes={pcmBytes} frames={frameCount} call={_callId}");
+            // Track buffers so Dispose can free unmanaged memory if the call ends
+            // before all frames are consumed.
+            audioMediaBuffers.AddRange(buffers);
 
-            var startTicks = DateTime.UtcNow.Ticks;
+            GraphLogger.Info(
+                $"Sotto: PlayWavAsync enqueueing -- file={wavPath} frames={buffers.Count} call={_callId}");
+            await audioVideoFramePlayer.EnqueueBuffersAsync(buffers, new List<VideoMediaBuffer>()).ConfigureAwait(false);
+            GraphLogger.Info(
+                $"Sotto: PlayWavAsync EnqueueBuffersAsync returned -- frames={buffers.Count} call={_callId}");
+        }
+
+        /// <summary>
+        /// Sotto disclosure playback: build a list of AudioSendBuffer instances from a
+        /// 16 kHz mono 16-bit PCM WAV's bytes, with timestamps starting at startTick
+        /// and incrementing by 20 ms (200000 ticks) per frame. Direct port of
+        /// Microsoft's EchoBot/AudioVideoPlaybackBot Utilities.CreateAudioMediaBuffers.
+        /// AudioSendBuffer is the SDK's concrete AudioMediaBuffer subclass shipping in
+        /// the Microsoft.Graph.Communications.Calls.Media NuGet; it frees the unmanaged
+        /// buffer in its own Dispose, so the caller only needs to hold a list and call
+        /// Dispose on each entry at end-of-call.
+        /// </summary>
+        private static List<AudioMediaBuffer> CreateAudioMediaBuffers(byte[] wavBytes, long startTick)
+        {
+            const int FrameBytes = 640;            // 20 ms of PCM 16 kHz mono 16-bit
+            const long FrameTicks = 20 * 10000;    // 20 ms in 100 ns DateTime ticks
+            const int WavHeaderBytes = 44;         // standard RIFF/WAVE header
+
+            var buffers = new List<AudioMediaBuffer>();
+            if (wavBytes == null || wavBytes.Length <= WavHeaderBytes) return buffers;
+
+            var pcmLen = wavBytes.Length - WavHeaderBytes;
+            var frameCount = pcmLen / FrameBytes;
+            var refTime = startTick;
+
             for (int i = 0; i < frameCount; i++)
             {
-                if (ct.IsCancellationRequested) break;
-
-                var frame = new byte[FrameBytes];
-                System.Buffer.BlockCopy(wav, WavHeaderBytes + i * FrameBytes, frame, 0, FrameBytes);
-
-                var ts = startTicks + i * FrameTicks;
-                var buffer = new SottoOutboundAudioBuffer(frame, ts);
-                try
-                {
-                    _audioSocket.Send(buffer);
-                }
-                catch (Exception ex)
-                {
-                    buffer.Dispose();
-                    GraphLogger.Error(ex,
-                        $"Sotto: IAudioSocket.Send failed at frame {i}/{frameCount} for call {_callId}");
-                    throw;
-                }
-
-                // Pace the next send to land at the next 20 ms boundary relative
-                // to start, so per-iteration drift doesn't accumulate. Task.Delay
-                // rounds up to ~15 ms granularity on Windows, but the SDK's
-                // jitter buffer absorbs that.
-                var nextSendTicks = startTicks + (i + 1) * FrameTicks;
-                var sleepTicks = nextSendTicks - DateTime.UtcNow.Ticks;
-                if (sleepTicks > 0)
-                {
-                    await Task.Delay(TimeSpan.FromTicks(sleepTicks), ct).ConfigureAwait(false);
-                }
+                IntPtr unmanagedBuffer = Marshal.AllocHGlobal(FrameBytes);
+                Marshal.Copy(wavBytes, WavHeaderBytes + i * FrameBytes, unmanagedBuffer, FrameBytes);
+                buffers.Add(new AudioSendBuffer(unmanagedBuffer, FrameBytes, AudioFormat.Pcm16K, refTime));
+                refTime += FrameTicks;
             }
 
-            GraphLogger.Info(
-                $"Sotto: PlayWavAsync complete -- frames_sent={frameCount} call={_callId}");
+            return buffers;
+        }
+
+        /// <summary>
+        /// Sotto disclosure playback: wait for outbound audio to become Active, create
+        /// the AudioVideoFramePlayer with a null VideoSocket (audio-only path proven
+        /// by EchoBot for VideoSocketSettings.Inactive), then (Phase 1 diagnostic)
+        /// auto-fire the test WAV. The auto-trigger is removed in the follow-up
+        /// commit when the announce endpoint becomes the trigger.
+        /// </summary>
+        private async Task StartAudioVideoFramePlayerAsync()
+        {
+            try
+            {
+                // Bound the wait so a Microsoft-side rejection of Sendrecv does not
+                // leave external PlayWavAsync callers blocked forever.
+                var winner = await Task.WhenAny(
+                    audioSendStatusActive.Task,
+                    Task.Delay(TimeSpan.FromSeconds(15))).ConfigureAwait(false);
+                if (winner != audioSendStatusActive.Task)
+                {
+                    GraphLogger.Warn($"Sotto: AudioSendStatus did not reach Active within 15s for call {_callId}; outbound playback unavailable");
+                    return;
+                }
+
+                GraphLogger.Info($"Sotto: audio send is Active for call {_callId}, creating AudioVideoFramePlayer");
+
+                audioVideoFramePlayerSettings = new AudioVideoFramePlayerSettings(
+                    new AudioSettings(20), new VideoSettings(), 1000);
+                audioVideoFramePlayer = new AudioVideoFramePlayer(
+                    (AudioSocket)_audioSocket,
+                    null,
+                    audioVideoFramePlayerSettings);
+                GraphLogger.Info($"Sotto: AudioVideoFramePlayer created for call {_callId}");
+
+                // startVideoPlayerCompleted must be set BEFORE the recursive
+                // PlayWavAsync call below, because PlayWavAsync awaits it.
+                startVideoPlayerCompleted.TrySetResult(true);
+
+                // Phase 1 diagnostic: auto-fire the disclosure WAV the moment the
+                // player is ready. Removed when the announce endpoint becomes the
+                // trigger.
+                const string diagnosticWavPath = @"C:\bot\disclosure-test.wav";
+                if (System.IO.File.Exists(diagnosticWavPath))
+                {
+                    GraphLogger.Info($"Sotto: diagnostic auto-firing PlayWavAsync for call {_callId}");
+                    await PlayWavAsync(diagnosticWavPath, CancellationToken.None).ConfigureAwait(false);
+                }
+                else
+                {
+                    GraphLogger.Warn($"Sotto: diagnostic WAV not found at {diagnosticWavPath} for call {_callId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                GraphLogger.Error(ex, $"Sotto: StartAudioVideoFramePlayerAsync failed for call {_callId}");
+            }
+            finally
+            {
+                // Failsafe: if we returned early or threw before setting it above.
+                startVideoPlayerCompleted.TrySetResult(true);
+            }
         }
     }
 }
