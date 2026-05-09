@@ -63,7 +63,13 @@ jobs:
 
       - name: Package and push helm chart to GHCR (OCI)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Classic PAT with write:packages scope. Required because the
+          # default GITHUB_TOKEN can only update existing packages, not
+          # create new ones (the docker image at ghcr.io/jupiter-hlaj/
+          # omnibot pre-existed; teams-recording-bot is a fresh package
+          # that GITHUB_TOKEN got 403 "installation not allowed to
+          # Create organization package" on).
+          GHCR_CHART_PAT: ${{ secrets.GHCR_CHART_PAT }}
           OWNER: ${{ github.repository_owner }}
           ACTOR: ${{ github.actor }}
           CHART_VERSION: ${{ steps.chart.outputs.version }}
@@ -80,6 +86,7 @@ jobs:
           # push to ghcr.io once on the runner, then helm upgrade pulls
           # the chart directly from ghcr.io inside the cluster. No
           # binary uploads, no tar corruption.
+          #
           # Chart.yaml declares an ingress-nginx dependency (condition:
           # ingress-nginx.enabled, which is false in values.yaml so it
           # never installs). helm package still requires the dependency
@@ -89,7 +96,7 @@ jobs:
           # charts/.
           helm dependency update deploy/teams-recording-bot
           helm package deploy/teams-recording-bot
-          echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          echo "$GHCR_CHART_PAT" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
           helm push "teams-recording-bot-$CHART_VERSION.tgz" "oci://ghcr.io/$OWNER"
 
       - name: Azure login (OIDC)
@@ -117,7 +124,11 @@ jobs:
 
       - name: Helm upgrade from OCI via az aks command invoke
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same PAT used by the runner-side push above, so the cluster's
+          # helm can pull the private chart artifact. Image pulls keep
+          # using the existing imagePullSecret pattern; this is helm-only
+          # auth for the chart artifact.
+          GHCR_CHART_PAT: ${{ secrets.GHCR_CHART_PAT }}
           OWNER: ${{ github.repository_owner }}
           ACTOR: ${{ github.actor }}
           CHART_VERSION: ${{ steps.chart.outputs.version }}
@@ -134,7 +145,7 @@ jobs:
           OUTPUT=$(az aks command invoke \
             --resource-group "${RESOURCE_GROUP}" \
             --name "${CLUSTER_NAME}" \
-            --command "echo '$GITHUB_TOKEN' | helm registry login ghcr.io -u '$ACTOR' --password-stdin && helm upgrade ${STATEFULSET} oci://ghcr.io/$OWNER/teams-recording-bot --version $CHART_VERSION --namespace ${NAMESPACE} --reset-then-reuse-values --set image.tag=${IMAGE_TAG}" \
+            --command "echo '$GHCR_CHART_PAT' | helm registry login ghcr.io -u '$ACTOR' --password-stdin && helm upgrade ${STATEFULSET} oci://ghcr.io/$OWNER/teams-recording-bot --version $CHART_VERSION --namespace ${NAMESPACE} --reset-then-reuse-values --set image.tag=${IMAGE_TAG}" \
             --query '{exitCode:exitCode,logs:logs}' \
             -o json)
           # Surface the inner logs and exit code regardless of outcome.
