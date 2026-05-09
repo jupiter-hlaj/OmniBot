@@ -33,6 +33,7 @@ namespace RecordingBot.Services.Bot
         private readonly DynamoResolver _dynamo;
         private readonly AwsUploader _uploader;
         private readonly AudioEncoder _encoder;
+        private readonly CallRegistry _callRegistry;
         private CallSession _session;
         private bool _sottoFinalized;
         private readonly SemaphoreSlim _sottoFinalizeLock = new(1, 1);
@@ -40,19 +41,25 @@ namespace RecordingBot.Services.Bot
         public ICall Call { get; }
         public BotMediaStream BotMediaStream { get; private set; }
 
-        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
+        public CallHandler(ICall statefulCall, IAzureSettings settings, IEventPublisher eventPublisher, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder, CallRegistry callRegistry) : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
         {
             _settings = (AzureSettings)settings;
             _eventPublisher = eventPublisher;
             _dynamo = dynamo;
             _uploader = uploader;
             _encoder = encoder;
+            _callRegistry = callRegistry;
 
             Call = statefulCall;
             Call.OnUpdated += CallOnUpdated;
             Call.Participants.OnUpdated += ParticipantsOnUpdated;
 
             BotMediaStream = new BotMediaStream(Call.GetLocalMediaSession(), Call.Id, GraphLogger, eventPublisher, _settings);
+
+            // Sotto disclosure playback (Phase 1 PoC): register this call in the
+            // per-pod registry so SottoAnnounceController can look up the
+            // BotMediaStream by Microsoft call id and invoke PlayWavAsync.
+            _callRegistry?.Register(Call.Id, BotMediaStream);
 
             if (_settings.CaptureEvents)
             {
@@ -76,6 +83,10 @@ namespace RecordingBot.Services.Bot
             Call.Participants.OnUpdated -= ParticipantsOnUpdated;
 
             BotMediaStream?.Dispose();
+
+            // Sotto disclosure playback: drop this call from the per-pod registry
+            // so subsequent /sotto/announce requests for this call id return 404.
+            _callRegistry?.Deregister(Call.Id);
 
             if (disposing)
             {

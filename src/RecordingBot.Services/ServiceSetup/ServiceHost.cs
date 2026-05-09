@@ -46,6 +46,11 @@ namespace RecordingBot.Services.ServiceSetup
             Services.AddSingleton<DynamoResolver>();
             Services.AddSingleton<AudioEncoder>();
 
+            // Sotto disclosure playback (Phase 1 PoC): per-pod registry of live
+            // calls keyed by Microsoft call id. SottoAnnounceController looks up
+            // the BotMediaStream for the target call and calls PlayWavAsync.
+            Services.AddSingleton<CallRegistry>();
+
             return this;
         }
 

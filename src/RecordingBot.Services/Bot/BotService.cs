@@ -28,6 +28,7 @@ namespace RecordingBot.Services.Bot
         private readonly DynamoResolver _dynamo;
         private readonly AwsUploader _uploader;
         private readonly AudioEncoder _encoder;
+        private readonly CallRegistry _callRegistry;
 
         public ConcurrentDictionary<string, CallHandler> CallHandlers { get; } = [];
         private ICommunicationsClient _client;
@@ -44,7 +45,7 @@ namespace RecordingBot.Services.Bot
             }
         }
 
-        public BotService(IGraphLogger logger, IEventPublisher eventPublisher, IAzureSettings settings, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder)
+        public BotService(IGraphLogger logger, IEventPublisher eventPublisher, IAzureSettings settings, DynamoResolver dynamo, AwsUploader uploader, AudioEncoder encoder, CallRegistry callRegistry)
         {
             _logger = logger;
             _eventPublisher = eventPublisher;
@@ -52,6 +53,7 @@ namespace RecordingBot.Services.Bot
             _dynamo = dynamo;
             _uploader = uploader;
             _encoder = encoder;
+            _callRegistry = callRegistry;
         }
 
         public void Initialize()
@@ -183,7 +185,7 @@ namespace RecordingBot.Services.Bot
         {
             foreach (var call in args.AddedResources)
             {
-                CallHandlers[call.Id] = new CallHandler(call, _settings, _eventPublisher, _dynamo, _uploader, _encoder);
+                CallHandlers[call.Id] = new CallHandler(call, _settings, _eventPublisher, _dynamo, _uploader, _encoder, _callRegistry);
             }
 
             foreach (var call in args.RemovedResources)
