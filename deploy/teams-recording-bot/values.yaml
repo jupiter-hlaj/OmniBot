@@ -70,6 +70,15 @@ container:
       audioSampleRate: "16000"    # 16000 native; 8000 cuts size further at the cost of frequency range
       audioBitrateKbps: "64"      # MP3 only; 32 = smaller, 96/128 = higher fidelity
       audioChannels: "2"          # 2 keeps speaker-per-channel labeling; 1 = mixed mono
+      # Sotto disclosure playback (Phase 1 PoC). When "true":
+      #   1. BotService.CreateLocalMediaSession sets the audio socket to Sendrecv
+      #      so IAudioSocket.Send is allowed (Recvonly otherwise).
+      #   2. SottoAnnounceController accepts POST /sotto/announce requests
+      #      (returns 503 otherwise).
+      # Default true for the dev cluster while Phase 1 is being validated.
+      # Flip to "false" before promoting to a prod cluster, or override
+      # per-cluster via --set container.env.sottoSetting.enableDisclosureTest=...
+      enableDisclosureTest: "true"
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious

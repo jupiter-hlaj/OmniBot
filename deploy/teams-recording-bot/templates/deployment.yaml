@@ -146,6 +146,11 @@ spec:
           value: "{{ .Values.container.env.sottoSetting.audioBitrateKbps | default "64" }}"
         - name: Sotto__AudioFormat__Channels
           value: "{{ .Values.container.env.sottoSetting.audioChannels | default "2" }}"
+        # Sotto disclosure playback (Phase 1 PoC). Read by BotService and
+        # SottoAnnounceController; gates the Sendrecv audio socket and the
+        # POST /sotto/announce endpoint.
+        - name: SOTTO_ENABLE_DISCLOSURE_TEST
+          value: "{{ .Values.container.env.sottoSetting.enableDisclosureTest | default "false" }}"
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:

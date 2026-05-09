@@ -19,6 +19,11 @@ COPY /scripts/entrypoint.cmd /bot
 COPY /scripts/halt_termination.ps1 /bot
 COPY --from=build /app /bot
 
+# Sotto disclosure playback (Phase 1 PoC): hardcoded test WAV that
+# SottoAnnounceController plays into the call when SOTTO_ENABLE_DISCLOSURE_TEST=true.
+# 16 kHz mono 16-bit PCM WAV generated via Polly Joanna (Neural).
+COPY /build/disclosure-test.wav /bot/disclosure-test.wav
+
 WORKDIR /bot
 
 RUN Set-ExecutionPolicy Bypass -Scope Process -Force; \
