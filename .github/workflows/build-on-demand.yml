@@ -88,20 +88,24 @@ jobs:
         run: |
           set -euo pipefail
           echo "Helm upgrade ${STATEFULSET} to image ${IMAGE_REPO}:${IMAGE_TAG}"
-          # `helm upgrade --reset-then-reuse-values` re-reads chart defaults
-          # while preserving any per-cluster --set overrides, then takes the
-          # new image tag from --set image.tag. Replaces the previous
-          # `kubectl set image` step which only swapped the image and
-          # silently dropped any other chart change (env vars, secret
-          # references, resource limits, etc). az aks command invoke
-          # uploads the chart directory via --file so helm sees it as
-          # ./teams-recording-bot in the temp container, no local kubeconfig
-          # or kubelogin needed.
+          # Tar the chart into a single tarball so `az aks command invoke
+          # --file` can upload it. --file does not reliably accept
+          # directories ("is not valid file, or not accessable"); the
+          # tarball preserves the Chart.yaml/values.yaml/templates/
+          # structure helm needs. Untar inside the command, then upgrade
+          # the release against the unpacked path. `helm upgrade
+          # --reset-then-reuse-values` re-reads chart defaults while
+          # preserving per-cluster --set overrides, then takes the new
+          # image tag from --set image.tag. Replaces the previous
+          # `kubectl set image` step which silently dropped any chart
+          # change other than the image (env vars, secret references,
+          # resource limits, etc).
+          tar -czf chart.tgz -C deploy teams-recording-bot
           az aks command invoke \
             --resource-group "${RESOURCE_GROUP}" \
             --name "${CLUSTER_NAME}" \
-            --file deploy/teams-recording-bot \
-            --command "helm upgrade ${STATEFULSET} ./teams-recording-bot \
+            --file chart.tgz \
+            --command "tar -xzf chart.tgz && helm upgrade ${STATEFULSET} ./teams-recording-bot \
               --namespace ${NAMESPACE} \
               --reset-then-reuse-values \
               --set image.tag=${IMAGE_TAG} \
