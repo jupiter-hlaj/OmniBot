@@ -16,6 +16,19 @@ metadata:
       location ~* ^({{ include "ingress.path.withTrailingSlash" . }})(?<instance>[0-9]*)/api/calling/notification {
         proxy_pass https://{{ $fullName }}-$instance.{{ $fullName }}.{{ $namespace }}.svc.cluster.local:{{ .Values.internal.port }};
       }
+      # Per-pod direct routing for the disclosure announce endpoint.
+      # /<ordinal>/sotto/announce -> the per-pod headless DNS for that
+      # StatefulSet replica, with the /<ordinal> prefix stripped via
+      # rewrite so the bot's controller still matches its fixed
+      # /sotto/announce route. The Lambda iterates ordinals 0..N-1 so
+      # exactly one pod (the one holding the call in CallRegistry)
+      # returns 202; the rest return 404 call_not_on_this_pod. Replaces
+      # the old LB-fanout-retry approach which depended on nginx
+      # round-robin happening to hit the right pod within 3 attempts.
+      location ~* ^/(?<announce_instance>[0-9]+)/sotto/announce$ {
+        rewrite ^/[0-9]+/sotto/announce$ /sotto/announce break;
+        proxy_pass https://{{ $fullName }}-$announce_instance.{{ $fullName }}.{{ $namespace }}.svc.cluster.local:{{ .Values.internal.port }};
+      }
 spec:
   ingressClassName: {{ include "ingress-nginx.fullname" .}}
   tls:

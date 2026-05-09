@@ -51,9 +51,38 @@ jobs:
       IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
     steps:
       - name: Checkout chart files
-        # Needed so `az aks command invoke --file deploy/teams-recording-bot`
-        # can upload the Helm chart to the cluster's admin-context container.
         uses: actions/checkout@v4
+
+      - name: Read chart version
+        id: chart
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^version:' deploy/teams-recording-bot/Chart.yaml | awk '{print $2}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Chart version: $VERSION"
+
+      - name: Package and push helm chart to GHCR (OCI)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Replaces the previous `tar -czf chart.tgz` + `az aks command
+          # invoke --file chart.tgz` flow, which silently corrupted the
+          # binary tarball on the way to the cluster's command-invoke pod
+          # (tar -xzf inside the cluster failed with "Error is not
+          # recoverable: exiting now"). The outer `az aks command invoke`
+          # exit code did not surface inner failures, so the workflow
+          # exited green for ~2 weeks while no helm upgrade actually
+          # ran. Switch to OCI-distributed charts: helm package + helm
+          # push to ghcr.io once on the runner, then helm upgrade pulls
+          # the chart directly from ghcr.io inside the cluster. No
+          # binary uploads, no tar corruption.
+          helm package deploy/teams-recording-bot
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          helm push "teams-recording-bot-$CHART_VERSION.tgz" "oci://ghcr.io/$OWNER"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -65,12 +94,6 @@ jobs:
       - name: Pre-check — AKS cluster must be running
         run: |
           set -euo pipefail
-          # Fail-fast pre-check: cluster being stopped is a human-actionable
-          # state (someone has to start it), not a transient infrastructure
-          # blip that self-heals. Polling for minutes just delays the
-          # actionable signal. Query powerState once; if not Running, exit
-          # immediately with a clear message naming the cluster, current
-          # state, and what to do about it.
           state=$(az aks show \
             --resource-group "${RESOURCE_GROUP}" \
             --name "${CLUSTER_NAME}" \
@@ -84,33 +107,38 @@ jobs:
             exit 1
           fi
 
-      - name: Helm upgrade via az aks command invoke
+      - name: Helm upgrade from OCI via az aks command invoke
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+          CHART_VERSION: ${{ steps.chart.outputs.version }}
         run: |
           set -euo pipefail
-          echo "Helm upgrade ${STATEFULSET} to image ${IMAGE_REPO}:${IMAGE_TAG}"
-          # Tar the chart into a single tarball so `az aks command invoke
-          # --file` can upload it. --file does not reliably accept
-          # directories ("is not valid file, or not accessable"); the
-          # tarball preserves the Chart.yaml/values.yaml/templates/
-          # structure helm needs. Untar inside the command, then upgrade
-          # the release against the unpacked path. `helm upgrade
-          # --reset-then-reuse-values` re-reads chart defaults while
-          # preserving per-cluster --set overrides, then takes the new
-          # image tag from --set image.tag. Replaces the previous
-          # `kubectl set image` step which silently dropped any chart
-          # change other than the image (env vars, secret references,
-          # resource limits, etc).
-          tar -czf chart.tgz -C deploy teams-recording-bot
-          az aks command invoke \
+          echo "Helm upgrade ${STATEFULSET} chart=${CHART_VERSION} image=${IMAGE_REPO}:${IMAGE_TAG}"
+          # Inner command: registry login (so the cluster can pull the
+          # OCI chart from ghcr.io), then helm upgrade. We drop --wait
+          # because Windows-image pulls routinely exceed any reasonable
+          # helm timeout; the next step (kubectl rollout status) watches
+          # async. With --reset-then-reuse-values the new chart's
+          # additions land while previously-set per-cluster values
+          # (host, ingress.tls.email, public.ip, etc.) are preserved.
+          OUTPUT=$(az aks command invoke \
             --resource-group "${RESOURCE_GROUP}" \
             --name "${CLUSTER_NAME}" \
-            --file chart.tgz \
-            --command "tar -xzf chart.tgz && helm upgrade ${STATEFULSET} ./teams-recording-bot \
-              --namespace ${NAMESPACE} \
-              --reset-then-reuse-values \
-              --set image.tag=${IMAGE_TAG} \
-              --wait \
-              --timeout 15m"
+            --command "echo '$GITHUB_TOKEN' | helm registry login ghcr.io -u '$ACTOR' --password-stdin && helm upgrade ${STATEFULSET} oci://ghcr.io/$OWNER/teams-recording-bot --version $CHART_VERSION --namespace ${NAMESPACE} --reset-then-reuse-values --set image.tag=${IMAGE_TAG}" \
+            --query '{exitCode:exitCode,logs:logs}' \
+            -o json)
+          # Surface the inner logs and exit code regardless of outcome.
+          # The previous workflow let the outer `az aks command invoke`
+          # success mask any inner helm failure; explicit jq parse + exit
+          # propagation is the proper fix.
+          echo "$OUTPUT" | jq -r '.logs'
+          EXIT_CODE=$(echo "$OUTPUT" | jq -r '.exitCode')
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::helm upgrade failed inside the cluster with exit code $EXIT_CODE"
+            exit "$EXIT_CODE"
+          fi
 
       - name: Watch rollout (15 min cap)
         run: |
