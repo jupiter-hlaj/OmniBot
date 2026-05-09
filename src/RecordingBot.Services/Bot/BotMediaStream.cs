@@ -40,6 +40,14 @@ namespace RecordingBot.Services.Bot
         private readonly ConcurrentDictionary<uint, int> _speakerChannelMap = new();
         private int _nextChannel;
 
+        /// <summary>
+        /// Sotto disclosure playback: tracks whether the audio socket is ready to
+        /// accept outbound frames via IAudioSocket.Send. Set true when the SDK raises
+        /// AudioSendStatusChanged with MediaSendStatus.Active, false otherwise. The
+        /// send loop in PlayWavAsync waits on this before sending the first frame.
+        /// </summary>
+        private volatile bool _canSendAudio;
+
         public BotMediaStream(
             ILocalMediaSession mediaSession,
             string callId,
@@ -65,6 +73,12 @@ namespace RecordingBot.Services.Bot
             }
 
             _audioSocket.AudioMediaReceived += OnAudioMediaReceived;
+
+            // Sotto disclosure playback (Phase 1 PoC): subscribe to outbound send
+            // status so PlayWavAsync only calls Send after MediaSendStatus reaches
+            // Active. No-op when StreamDirections is Recvonly (the SDK never raises
+            // Active in that case, and PlayWavAsync's 5-second wait will time out).
+            _audioSocket.AudioSendStatusChanged += OnAudioSendStatusChanged;
         }
 
         public List<IParticipant> GetParticipants()
@@ -94,6 +108,7 @@ namespace RecordingBot.Services.Bot
             base.Dispose(disposing);
 
             _audioSocket.AudioMediaReceived -= OnAudioMediaReceived;
+            _audioSocket.AudioSendStatusChanged -= OnAudioSendStatusChanged;
 
             if (disposing)
             {
@@ -149,6 +164,102 @@ namespace RecordingBot.Services.Bot
             {
                 e.Buffer.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Sotto disclosure playback: outbound send-status callback. The SDK raises
+        /// this once StreamDirections=Sendrecv has negotiated outbound RTP and the
+        /// platform is ready to accept Send() calls. Inactive status is also
+        /// expected at end-of-call or when send is paused; the send loop checks
+        /// this flag before each frame.
+        /// </summary>
+        private void OnAudioSendStatusChanged(object sender, AudioSendStatusChangedEventArgs e)
+        {
+            GraphLogger.Info($"Sotto: AudioSendStatusChanged for call {_callId}: {e.MediaSendStatus}");
+            _canSendAudio = e.MediaSendStatus == MediaSendStatus.Active;
+        }
+
+        /// <summary>
+        /// Sotto disclosure playback (Phase 1 PoC): loads a 16 kHz mono 16-bit PCM
+        /// WAV from disk and streams it into the live call by pacing 20 ms frames
+        /// into IAudioSocket.Send at 50 frames per second. The SDK takes ownership
+        /// of each SottoOutboundAudioBuffer and disposes it when finished.
+        ///
+        /// Requires the audio socket to be Sendrecv (gated on
+        /// SOTTO_ENABLE_DISCLOSURE_TEST in BotService.CreateLocalMediaSession) and
+        /// to have published an AudioSendStatusChanged event with
+        /// MediaSendStatus.Active. Recording continues uninterrupted alongside,
+        /// since AudioMediaReceived is unaffected by enabling the send direction
+        /// on the same socket.
+        /// </summary>
+        public async Task PlayWavAsync(string wavPath, CancellationToken ct = default)
+        {
+            const int FrameBytes = 640;          // 20 ms of PCM 16 kHz mono 16-bit = 320 samples * 2 bytes
+            const long FrameTicks = 200_000;     // 20 ms expressed in 100 ns DateTime ticks
+            const int WavHeaderBytes = 44;       // standard RIFF/WAVE header for our Polly-generated PCM
+
+            // Wait for outbound to become active. If AudioSendStatusChanged(Active)
+            // hasn't fired within 5 seconds, the call is in a state where Send
+            // would be rejected; bail rather than queue forever.
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (!_canSendAudio)
+            {
+                if (DateTime.UtcNow > deadline)
+                {
+                    throw new InvalidOperationException(
+                        $"AudioSendStatus did not reach Active within 5s for call {_callId}");
+                }
+                await Task.Delay(50, ct).ConfigureAwait(false);
+            }
+
+            var wav = await File.ReadAllBytesAsync(wavPath, ct).ConfigureAwait(false);
+            if (wav.Length <= WavHeaderBytes)
+            {
+                throw new InvalidOperationException(
+                    $"WAV file too small ({wav.Length} bytes), expected RIFF header + PCM data: {wavPath}");
+            }
+
+            var pcmBytes = wav.Length - WavHeaderBytes;
+            var frameCount = pcmBytes / FrameBytes;
+            GraphLogger.Info(
+                $"Sotto: PlayWavAsync starting -- file={wavPath} pcm_bytes={pcmBytes} frames={frameCount} call={_callId}");
+
+            var startTicks = DateTime.UtcNow.Ticks;
+            for (int i = 0; i < frameCount; i++)
+            {
+                if (ct.IsCancellationRequested) break;
+
+                var frame = new byte[FrameBytes];
+                System.Buffer.BlockCopy(wav, WavHeaderBytes + i * FrameBytes, frame, 0, FrameBytes);
+
+                var ts = startTicks + i * FrameTicks;
+                var buffer = new SottoOutboundAudioBuffer(frame, ts);
+                try
+                {
+                    _audioSocket.Send(buffer);
+                }
+                catch (Exception ex)
+                {
+                    buffer.Dispose();
+                    GraphLogger.Error(ex,
+                        $"Sotto: IAudioSocket.Send failed at frame {i}/{frameCount} for call {_callId}");
+                    throw;
+                }
+
+                // Pace the next send to land at the next 20 ms boundary relative
+                // to start, so per-iteration drift doesn't accumulate. Task.Delay
+                // rounds up to ~15 ms granularity on Windows, but the SDK's
+                // jitter buffer absorbs that.
+                var nextSendTicks = startTicks + (i + 1) * FrameTicks;
+                var sleepTicks = nextSendTicks - DateTime.UtcNow.Ticks;
+                if (sleepTicks > 0)
+                {
+                    await Task.Delay(TimeSpan.FromTicks(sleepTicks), ct).ConfigureAwait(false);
+                }
+            }
+
+            GraphLogger.Info(
+                $"Sotto: PlayWavAsync complete -- frames_sent={frameCount} call={_callId}");
         }
     }
 }

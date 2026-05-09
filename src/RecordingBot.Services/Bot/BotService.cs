@@ -132,11 +132,27 @@ namespace RecordingBot.Services.Bot
         {
             try
             {
+                // Sotto disclosure playback (Phase 1 PoC): when SOTTO_ENABLE_DISCLOSURE_TEST=true,
+                // negotiate the audio socket as Sendrecv so the bot can call IAudioSocket.Send
+                // to inject TTS-rendered disclosures into the live call. Off by default so prod
+                // pods stay Recvonly. Receive direction (recording) is preserved either way; per
+                // the Microsoft.Skype.Bots.Media SDK, AudioMediaReceived continues to fire when
+                // StreamDirections is Sendrecv, and ReceiveUnmixedMeetingAudio remains valid for
+                // the receive side. PlayPromptAsync was rejected as the injection mechanism per
+                // microsoft-graph-comms-samples Issue #679 (service-hosted media bots only).
+                var disclosureTestEnabled = string.Equals(
+                    Environment.GetEnvironmentVariable("SOTTO_ENABLE_DISCLOSURE_TEST"),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase);
+                var audioStreamDirections = disclosureTestEnabled
+                    ? StreamDirection.Sendrecv
+                    : StreamDirection.Recvonly;
+
                 // create media session object, this is needed to establish call connections
                 return Client.CreateMediaSession(
                     new AudioSocketSettings
                     {
-                        StreamDirections = StreamDirection.Recvonly,
+                        StreamDirections = audioStreamDirections,
                         // Note! Currently, the only audio format supported when receiving unmixed audio is Pcm16K
                         SupportedAudioFormat = AudioFormat.Pcm16K,
                         ReceiveUnmixedMeetingAudio = true //get the extra buffers for the speakers
