@@ -172,11 +172,35 @@ namespace RecordingBot.Services.Bot
         /// platform is ready to accept Send() calls. Inactive status is also
         /// expected at end-of-call or when send is paused; the send loop checks
         /// this flag before each frame.
+        ///
+        /// Phase 1 diagnostic: when Active fires, fire-and-forget PlayWavAsync
+        /// against the baked-in test WAV. This isolates the SDK and Microsoft
+        /// media platform questions ("does Sendrecv negotiate?", "does Send
+        /// deliver?") with no announce-endpoint plumbing in the way. The
+        /// auto-trigger gets removed in the next push once the diagnostic
+        /// answers those questions.
         /// </summary>
         private void OnAudioSendStatusChanged(object sender, AudioSendStatusChangedEventArgs e)
         {
             GraphLogger.Info($"Sotto: AudioSendStatusChanged for call {_callId}: {e.MediaSendStatus}");
             _canSendAudio = e.MediaSendStatus == MediaSendStatus.Active;
+
+            if (_canSendAudio)
+            {
+                const string diagnosticWavPath = @"C:\bot\disclosure-test.wav";
+                GraphLogger.Info($"Sotto: diagnostic auto-trigger firing PlayWavAsync for call {_callId}");
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await PlayWavAsync(diagnosticWavPath).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        GraphLogger.Error(ex, $"Sotto: diagnostic PlayWavAsync threw for call {_callId}");
+                    }
+                });
+            }
         }
 
         /// <summary>
