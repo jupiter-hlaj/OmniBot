@@ -168,6 +168,12 @@ spec:
               name: sotto-announce-secret
               key: secret
               optional: true
+        # Pod count exposed for the Sotto Lambda's announce fanout. Sourced
+        # from the same scale.replicaCount that drives the StatefulSet's
+        # spec.replicas above, so there is exactly one place to update when
+        # scaling. SottoPodsController serves this via GET /sotto/pods.
+        - name: BOT_REPLICAS
+          value: "{{ .Values.scale.replicaCount }}"
         resources:
           {{- toYaml .Values.resources | nindent 12 }}
       volumes:
