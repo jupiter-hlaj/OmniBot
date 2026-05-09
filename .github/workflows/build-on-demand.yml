@@ -50,6 +50,11 @@ jobs:
       IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/omnibot
       IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
     steps:
+      - name: Checkout chart files
+        # Needed so `az aks command invoke --file deploy/teams-recording-bot`
+        # can upload the Helm chart to the cluster's admin-context container.
+        uses: actions/checkout@v4
+
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
@@ -79,20 +84,29 @@ jobs:
             exit 1
           fi
 
-      - name: Roll image via az aks command invoke
+      - name: Helm upgrade via az aks command invoke
         run: |
           set -euo pipefail
-          NEW_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-          echo "Setting ${STATEFULSET}/${CONTAINER} to ${NEW_IMAGE}"
-          # az aks command invoke runs kubectl inside the cluster's
-          # admin context — no kubeconfig wrangling, no kubelogin.
-          # Requires Microsoft.ContainerService/managedClusters/runcommand/action,
-          # which is in the Contributor role scope-attached to this single
-          # cluster (sotto-bot-deploy AAD app, app-id $AZURE_CLIENT_ID).
+          echo "Helm upgrade ${STATEFULSET} to image ${IMAGE_REPO}:${IMAGE_TAG}"
+          # `helm upgrade --reset-then-reuse-values` re-reads chart defaults
+          # while preserving any per-cluster --set overrides, then takes the
+          # new image tag from --set image.tag. Replaces the previous
+          # `kubectl set image` step which only swapped the image and
+          # silently dropped any other chart change (env vars, secret
+          # references, resource limits, etc). az aks command invoke
+          # uploads the chart directory via --file so helm sees it as
+          # ./teams-recording-bot in the temp container, no local kubeconfig
+          # or kubelogin needed.
           az aks command invoke \
             --resource-group "${RESOURCE_GROUP}" \
             --name "${CLUSTER_NAME}" \
-            --command "kubectl set image statefulset/${STATEFULSET} ${CONTAINER}=${NEW_IMAGE} -n ${NAMESPACE}"
+            --file deploy/teams-recording-bot \
+            --command "helm upgrade ${STATEFULSET} ./teams-recording-bot \
+              --namespace ${NAMESPACE} \
+              --reset-then-reuse-values \
+              --set image.tag=${IMAGE_TAG} \
+              --wait \
+              --timeout 15m"
 
       - name: Watch rollout (15 min cap)
         run: |

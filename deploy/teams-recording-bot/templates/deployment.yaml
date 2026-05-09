@@ -156,6 +156,18 @@ spec:
             secretKeyRef:
               name: {{ .Values.container.env.sottoSetting.awsCredsSecretName }}
               key: secretAccessKey
+        # Sotto disclosure playback: HMAC shared secret for the /sotto/announce
+        # endpoint. Sourced from K8s Secret sotto-announce-secret/secret created
+        # out-of-band (matching value lives in AWS Secrets Manager at
+        # sotto/disclosure/announce-shared-secret). optional: true so pods come
+        # up if the secret is missing or being rotated; SottoAnnounceController
+        # returns 503 when the env var is empty.
+        - name: SOTTO_ANNOUNCE_SHARED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: sotto-announce-secret
+              key: secret
+              optional: true
         resources:
           {{- toYaml .Values.resources | nindent 12 }}
       volumes:
