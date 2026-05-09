@@ -41,6 +41,16 @@ namespace RecordingBot.Services.Bot
         private int _nextChannel;
 
         /// <summary>
+        /// Sotto disclosure playback: most recent inbound buffer timestamp from
+        /// AudioMediaReceived, used as the base tick for appending bot-injected
+        /// audio (PlayWavAsync) to SottoAudioBuffer at the right point on the
+        /// recording timeline. The SDK's inbound clock is not DateTime ticks; we
+        /// must echo the inbound clock for AlignAndInterleave to place our
+        /// injected samples in the correct time slot.
+        /// </summary>
+        private long _lastInboundTimestamp;
+
+        /// <summary>
         /// Sotto disclosure playback: AudioVideoFramePlayer state. Adapted from
         /// Microsoft's EchoBot sample (Samples/PublicSamples/EchoBot), we drive
         /// outbound audio via AudioVideoFramePlayer.EnqueueBuffersAsync rather
@@ -153,6 +163,10 @@ namespace RecordingBot.Services.Bot
         {
             GraphLogger.Info($"Received Audio: [AudioMediaReceivedEventArgs(Data=<{e.Buffer.Data}>, Length={e.Buffer.Length}, Timestamp={e.Buffer.Timestamp})]");
 
+            // Track the SDK's inbound clock so PlayWavAsync can timestamp
+            // bot-injected audio in the same reference frame for the recording.
+            _lastInboundTimestamp = e.Buffer.Timestamp;
+
             // Sotto integration: in Teams compliance recording mode, buffer.Data is always
             // silence. Real audio arrives in UnmixedAudioBuffers — one entry per active
             // speaker. First two distinct ActiveSpeakerIds map to channel 0 and 1.
@@ -255,6 +269,47 @@ namespace RecordingBot.Services.Bot
             // before all frames are consumed.
             audioMediaBuffers.AddRange(buffers);
 
+            // Append the same PCM samples to the recording buffer so the
+            // disclosure shows up in the audit-trail MP3 and the transcript.
+            // Microsoft does not loop the bot's outbound back via
+            // AudioMediaReceived, so without this the recording would only
+            // have participant audio. We use the most recent inbound
+            // timestamp as the base so AlignAndInterleave places the
+            // disclosure at the correct point on the recording timeline.
+            // Append to both channels so it's audible in the stereo mix
+            // regardless of which speaker channel ends up active.
+            // AlignAndInterleave was changed in this commit to mix-with-clamp,
+            // so this overlay does not destroy participant audio at the
+            // same timestamps.
+            var recordingBaseTick = _lastInboundTimestamp;
+            if (recordingBaseTick > 0)
+            {
+                const int FrameBytesLocal = 640;
+                const int WavHeaderBytesLocal = 44;
+                const long FrameTicksLocal = 20 * 10000;
+                var pcmLen = wav.Length - WavHeaderBytesLocal;
+                var frameCount = pcmLen / FrameBytesLocal;
+                for (int i = 0; i < frameCount; i++)
+                {
+                    var samples0 = new short[FrameBytesLocal / 2];
+                    System.Buffer.BlockCopy(wav, WavHeaderBytesLocal + i * FrameBytesLocal, samples0, 0, FrameBytesLocal);
+                    // Separate copy for channel 1; AudioBuffer holds the
+                    // array reference and we must not share it across channels.
+                    var samples1 = new short[samples0.Length];
+                    Array.Copy(samples0, samples1, samples0.Length);
+                    var ts = recordingBaseTick + i * FrameTicksLocal;
+                    SottoAudioBuffer.AppendSamples(0, samples0, ts);
+                    SottoAudioBuffer.AppendSamples(1, samples1, ts);
+                }
+                GraphLogger.Info(
+                    $"Sotto: appended {frameCount} disclosure frames to recording (base_tick={recordingBaseTick}) for call {_callId}");
+            }
+            else
+            {
+                GraphLogger.Warn(
+                    $"Sotto: no inbound timestamp seen yet for call {_callId}; disclosure NOT appended to recording");
+            }
+
             GraphLogger.Info(
                 $"Sotto: PlayWavAsync enqueueing -- file={wavPath} frames={buffers.Count} call={_callId}");
             await audioVideoFramePlayer.EnqueueBuffersAsync(buffers, new List<VideoMediaBuffer>()).ConfigureAwait(false);
@@ -328,23 +383,11 @@ namespace RecordingBot.Services.Bot
                     audioVideoFramePlayerSettings);
                 GraphLogger.Info($"Sotto: AudioVideoFramePlayer created for call {_callId}");
 
-                // startVideoPlayerCompleted must be set BEFORE the recursive
-                // PlayWavAsync call below, because PlayWavAsync awaits it.
+                // Player is ready; external callers (SottoAnnounceController)
+                // can now invoke PlayWavAsync. The diagnostic auto-fire that
+                // played the test WAV at call start has been removed; the
+                // announce endpoint is the only trigger.
                 startVideoPlayerCompleted.TrySetResult(true);
-
-                // Phase 1 diagnostic: auto-fire the disclosure WAV the moment the
-                // player is ready. Removed when the announce endpoint becomes the
-                // trigger.
-                const string diagnosticWavPath = @"C:\bot\disclosure-test.wav";
-                if (System.IO.File.Exists(diagnosticWavPath))
-                {
-                    GraphLogger.Info($"Sotto: diagnostic auto-firing PlayWavAsync for call {_callId}");
-                    await PlayWavAsync(diagnosticWavPath, CancellationToken.None).ConfigureAwait(false);
-                }
-                else
-                {
-                    GraphLogger.Warn($"Sotto: diagnostic WAV not found at {diagnosticWavPath} for call {_callId}");
-                }
             }
             catch (Exception ex)
             {

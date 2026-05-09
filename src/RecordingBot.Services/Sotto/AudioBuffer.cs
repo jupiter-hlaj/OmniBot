@@ -169,11 +169,25 @@ public sealed class AudioBuffer : IDisposable
         static void WriteChannel(List<(long Timestamp, short[] Samples)> frames,
             short[] output, long startTick, int chIdx)
         {
+            // Sum-with-clamp instead of direct assignment. Lets bot-injected
+            // audio (the disclosure clip from PlayWavAsync) overlay
+            // participant audio at the same timestamps rather than
+            // overwriting it. For normal inbound flow each speaker writes
+            // to its own channel with non-overlapping timestamps so the
+            // sum is just (0 + sample) and behavior is unchanged. Without
+            // this the audit-trail recording would lose 5+ seconds of
+            // participant audio every time a disclosure played.
             foreach (var (ts, samples) in frames)
             {
                 var offset = (int)((ts - startTick) / TicksPerSample);
                 for (int i = 0; i < samples.Length; i++)
-                    output[(offset + i) * 2 + chIdx] = samples[i];
+                {
+                    var idx = (offset + i) * 2 + chIdx;
+                    var sum = output[idx] + samples[i];
+                    if (sum > short.MaxValue) sum = short.MaxValue;
+                    else if (sum < short.MinValue) sum = short.MinValue;
+                    output[idx] = (short)sum;
+                }
             }
         }
 
